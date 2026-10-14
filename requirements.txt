@@ -1,0 +1,14 @@
+# Live captions: Nemotron streaming ASR on sherpa-onnx (CPU, bundles its own ONNX Runtime).
+sherpa-onnx==1.13.8
+# Video -> subtitle files: Parakeet TDT 0.6B v3 on onnx-asr, run in a child process
+# (see live_subtitles/transcribe.py). onnxruntime-gpu stays below 1.27 (CUDA 13 drops
+# Pascal) and cuDNN stays at 9.10.2.21 (9.11+ fails on the GTX 1070), as in Paradee-TTS.
+onnx-asr==0.12.0
+onnxruntime-gpu[cuda,cudnn]==1.23.2
+nvidia-cudnn-cu12==9.10.2.21
+huggingface_hub==2.2.0
+# Desktop shell, system-audio capture, resampling.
+PySide6-Essentials==6.12.0   # QtCore/QtGui/QtWidgets/QtNetwork only; the full PySide6 adds WebEngine etc.
+PyAudioWPatch==0.2.12.9
+soxr==1.1.0
+numpy==2.5.4
