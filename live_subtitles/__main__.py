@@ -3,6 +3,7 @@
     python -m live_subtitles                  # tray app (live subtitles + settings)
     python -m live_subtitles --settings       # same, with the settings window open
     python -m live_subtitles transcribe FILE  # write subtitle files for videos, no GUI
+    python -m live_subtitles unified-worker   # GPU live recogniser (started by the app)
 """
 
 import sys
@@ -10,6 +11,13 @@ import sys
 
 def main() -> int:
     argv = sys.argv[1:]
+    if argv and argv[0] == "unified-worker":
+        import logging
+
+        logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
+        from .unified import worker_main
+
+        return worker_main(argv[1:])
     if argv and argv[0] == "transcribe":
         import logging
 

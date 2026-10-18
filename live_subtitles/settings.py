@@ -56,12 +56,16 @@ class Layout:
 
 @dataclass
 class Engine:
-    language: str = "en"                # "en" uses the English model; else a locale or "auto"
-    # 160 | 560 | 1120. On Tears of Steel: words appear 0.32 s after speech at 160 ms vs
-    # 0.56 s (p90 0.72 s) at 560 ms, for ~2 points more WER (30.8% vs 28.4%).
-    latency_ms: int = 160
-    punctuation: bool = True            # English: re-punctuate with a dedicated model
-    threads: int = 4
+    language: str = "en"                # "en" uses the English models; else a locale or "auto"
+    # English: "auto" runs Parakeet-unified on a CUDA GPU and falls back to Nemotron on the
+    # CPU when there is no usable GPU; "gpu" and "cpu" force one (other languages: CPU).
+    recognizer: str = "auto"
+    # Nemotron (CPU) chunk: 160 | 560 | 1120 ms. On the 16-scene benchmark 560 ms was as
+    # accurate as 160 ms (17.0% vs 17.6% WER on real audio) at a third of the CPU; 160 ms
+    # needed ~9 cores to stay ahead of real time.
+    latency_ms: int = 560
+    punctuation: bool = True            # Nemotron English: re-punctuate with a dedicated model
+    threads: int = 2                    # Nemotron (CPU) threads: 560 ms needs ~1.9 cores at 2
     device: str = ""                    # loopback device name; "" = Windows default output
     dialogue_boost: bool = True         # favour the centre channel on 5.1/7.1 output
     autostart: bool = True              # start captioning when the app launches

@@ -13,6 +13,7 @@ from live_subtitles.captions import CaptionBuilder
 from live_subtitles.hotkeys import MOD_ALT, MOD_CONTROL, MOD_SHIFT, parse
 from live_subtitles.models import live_model
 from live_subtitles.subtitles import Word, ass_color, build_cues, split_lines, to_ass, to_srt, to_vtt
+from live_subtitles.unified import UnifiedStreamer
 
 
 class CaptionBuilderTests(unittest.TestCase):
@@ -72,7 +73,7 @@ class CaptionBuilderTests(unittest.TestCase):
         self.assertEqual(b.display_lines(), ["Hello there friend."])
 
     def test_punctuation_window_start_is_not_recapitalised(self):
-        from live_subtitles.captions import PUNCT_CONTEXT, PUNCT_WINDOW
+        from live_subtitles.captions import PUNCT_EDITABLE, PUNCT_WINDOW
 
         def fake(words):
             return [words[0].capitalize(), *words[1:]]
@@ -84,7 +85,56 @@ class CaptionBuilderTests(unittest.TestCase):
         # Only w0 was ever a true start; later window starts are context, not sentence starts.
         self.assertEqual(b.shown[0], "W0")
         self.assertTrue(all(w.islower() for w in b.shown[1:]))
-        self.assertGreater(PUNCT_CONTEXT, 0)
+        self.assertLess(PUNCT_EDITABLE, PUNCT_WINDOW)
+
+    def test_only_newest_words_take_punctuation_edits(self):
+        from live_subtitles.captions import PUNCT_EDITABLE
+
+        calls = []
+
+        def shout(words):   # upper-case everything it is given
+            calls.append(len(words))
+            return [w.upper() for w in words]
+
+        b = CaptionBuilder(max_lines=50, max_chars=200, sentence_breaks=False, punctuate=shout)
+        for i in range(10):
+            b.add([f"w{i}"], "", 0.0)
+        # Each word was editable only while it was among the newest few, so all ended up
+        # upper-cased exactly once, while they were new; nothing older is touched later.
+        self.assertEqual(b.shown, [f"W{i}" for i in range(10)])
+        snapshot = list(b.shown[:-PUNCT_EDITABLE])
+        b.punctuate = lambda words: [w.lower() for w in words]
+        b.add(["w10"], "", 0.0)
+        self.assertEqual(b.shown[:len(snapshot)], snapshot)
+
+    def test_placed_words_never_change_line(self):
+        def late_period(words):   # puts a period after "two" once "four" has arrived
+            out = list(words)
+            if "four" in words:
+                out[words.index("two")] = "two."
+            return out
+
+        b = CaptionBuilder(max_lines=3, max_chars=40, punctuate=late_period)
+        b.add(["one", "two", "three"], "", 0.0)
+        self.assertEqual(b.display_lines(), ["one two three"])
+        b.add(["four"], "", 0.0)
+        # "two." now ends a sentence, but "three" was already on screen on that line.
+        self.assertEqual(b.display_lines(), ["one two. three four"])
+        b.add(["five"], "", 0.0)
+        self.assertEqual(b.line_of, [0, 0, 0, 0, 0])
+
+    def test_pending_words_flow_after_committed(self):
+        b = CaptionBuilder(max_lines=2, max_chars=12, sentence_breaks=False)
+        b.add(["alpha", "beta"], ["gamma", "delta"], 0.0)
+        self.assertEqual(b.display_lines(), ["alpha beta", "gamma delta"])
+        self.assertEqual(b.line_of, [0, 0])
+
+    def test_resize_relays_out(self):
+        b = CaptionBuilder(max_lines=5, max_chars=40, sentence_breaks=False)
+        b.add("aaaa bbbb cccc dddd".split(), "", 0.0)
+        self.assertEqual(b.display_lines(), ["aaaa bbbb cccc dddd"])
+        b.configure(max_chars=10)
+        self.assertEqual(b.display_lines(), ["aaaa bbbb", "cccc dddd"])
 
     def test_sentence_case_fix(self):
         from live_subtitles.punctuate import fix_sentence_case, plain
@@ -236,8 +286,81 @@ class ModelCatalogTests(unittest.TestCase):
         self.assertEqual(m.language, "de-DE")
         self.assertIn("1120ms", m.name)
 
+    def test_default_engine_settings(self):
+        e = S.Engine()
+        self.assertEqual((e.recognizer, e.latency_ms), ("auto", 560))
+
     def test_unknown_latency_falls_back(self):
         self.assertEqual(live_model("en", 999).latency_ms, 560)
+
+
+def bare_streamer() -> UnifiedStreamer:
+    """A UnifiedStreamer with its feature and word state, but no ONNX sessions."""
+    from importlib.resources import files
+
+    import numpy as np
+
+    u = UnifiedStreamer.__new__(UnifiedStreamer)
+    u.left = 560
+    with files("onnx_asr.preprocessors").joinpath("data").joinpath("fbanks.npz").open("rb") as f:
+        u.fbank = np.load(f)["nemo128"].astype(np.float32)
+    u.window = np.pad(np.hanning(400), (56, 56)).astype(np.float32)
+    u.pre, u.pre_at, u.last_sample = np.zeros(256, np.float32), -256, 0.0
+    u.feats, u.feat_at, u.n_feats, u.center = np.zeros((0, 128), np.float32), 0, 0, 0
+    u.word = u.shown_word = ""
+    u.last_token_t, u.phrase, u.phrase_words = 0.0, 0, 0
+    return u
+
+
+class UnifiedStreamerTests(unittest.TestCase):
+    def test_streamed_features_match_whole_file(self):
+        import numpy as np
+
+        rng = np.random.default_rng(1)
+        audio = (rng.standard_normal(16000 * 3) * 0.1).astype(np.float32)
+        # NeMo's preprocessing over the whole clip at once: pre-emphasis, centred frames.
+        x = audio - 0.97 * np.concatenate([[0], audio[:-1]])
+        x = np.pad(x, (256, 256))
+        u = bare_streamer()
+        fr = np.lib.stride_tricks.sliding_window_view(x, 512)[::160] * u.window
+        whole = np.log((np.abs(np.fft.rfft(fr, 512)) ** 2).astype(np.float32) @ u.fbank + 2 ** -24)
+        i = 0
+        for n in rng.integers(50, 2000, size=200):        # uneven WASAPI-like packets
+            u._features(audio[i:i + n])
+            i += n
+            if i >= audio.size:
+                break
+        n = u.n_feats
+        self.assertGreater(n, 290)
+        np.testing.assert_allclose(u.feats[:n], whole[:n], rtol=1e-4, atol=1e-3)
+
+    def test_tokens_become_words(self):
+        u = bare_streamer()
+        out = []
+        for tok, t in (("▁he", 0.1), ("llo", 0.2), ("▁wor", 0.3), ("ld", 0.4), ("▁again", 0.5)):
+            out += u._token(tok, t)
+        self.assertEqual(out, ["hello", "world"])
+        self.assertEqual(u.word, "again")
+
+    def test_late_period_attaches_to_the_open_word(self):
+        # The model emits a sentence's period only when the next sentence starts.
+        u = bare_streamer()
+        out = u._token("▁error", 7.9) + u._token(".", 10.6) + u._token("▁I", 10.8)
+        self.assertEqual(out, ["error."])
+        self.assertEqual(u.word, "I")
+        self.assertEqual(u.phrase, 1)          # the 2.7 s gap started a new phrase
+
+    def test_stray_punctuation_without_a_word_is_dropped(self):
+        u = bare_streamer()
+        self.assertEqual(u._token("▁,", 1.0), [])
+        self.assertEqual(u._token("▁so", 1.1), [])
+        self.assertEqual(u.word, "so")
+
+    def test_flush_commits_the_open_word(self):
+        u = bare_streamer()
+        u._token("▁bye", 1.0)
+        self.assertEqual(u._flush_pending(force=True), [(["bye"], [], 0)])
+        self.assertEqual(u._flush_pending(force=True), [])
 
 
 if __name__ == "__main__":

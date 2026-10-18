@@ -1,9 +1,12 @@
 """Live model catalog and first-use download.
 
-Live captions run NVIDIA's cache-aware streaming Nemotron models through sherpa-onnx.
-English uses the English-only model (more accurate on English in our bake-off); any
-other language, or auto-detect, uses the multilingual Nemotron 3.5. Each latency is a
-separate int8 export published by sherpa-onnx, about 470 MB each.
+English live captions run NVIDIA's Parakeet-unified 0.6B on a CUDA GPU (`unified.py`),
+from sherpa-onnx's fp32 buffered-streaming export (2.5 GB, Hugging Face).
+
+Without a usable GPU, and for every other language, they run NVIDIA's cache-aware
+streaming Nemotron models on the CPU through sherpa-onnx: the English-only model for
+English, the multilingual Nemotron 3.5 otherwise. Each latency is a separate int8 export
+published by sherpa-onnx, about 470 MB each.
 """
 
 from __future__ import annotations
@@ -81,6 +84,30 @@ class PunctModel:
 PUNCT_MODEL = PunctModel()
 
 
+@dataclass(frozen=True)
+class HubModel:
+    """A model fetched file by file from a Hugging Face repo."""
+    name: str               # folder under MODELS_DIR
+    repo: str
+    files: tuple[str, ...]
+
+    @property
+    def path(self) -> Path:
+        return MODELS_DIR / self.name
+
+    @property
+    def url(self) -> str:
+        return f"https://huggingface.co/{self.repo}"
+
+    def is_installed(self) -> bool:
+        return all((self.path / f).is_file() for f in self.files)
+
+
+UNIFIED_MODEL = HubModel("parakeet-unified-en-0.6b-streaming-fp32",
+                         "csukuangfj2/sherpa-onnx-nemo-parakeet-unified-en-0.6b-streaming-240ms",
+                         ("encoder.onnx", "encoder.weights", "decoder.onnx", "joiner.onnx", "tokens.txt"))
+
+
 def live_model(language: str, latency_ms: int) -> LiveModel:
     if latency_ms not in LATENCIES:
         latency_ms = 560
@@ -91,10 +118,12 @@ def live_model(language: str, latency_ms: int) -> LiveModel:
                      language or "auto", latency_ms)
 
 
-def download(model: LiveModel | PunctModel, progress: Callable[[int, int], None] | None = None) -> Path:
-    """Download and extract a model package. progress(done_bytes, total_bytes)."""
+def download(model: LiveModel | PunctModel | HubModel, progress: Callable[[int, int], None] | None = None) -> Path:
+    """Download (and extract) a model. progress(done_bytes, total_bytes)."""
     if model.is_installed():
         return model.path
+    if isinstance(model, HubModel):
+        return _download_hub(model, progress)
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     staging = MODELS_DIR / f".{model.name}.partial"
     shutil.rmtree(staging, ignore_errors=True)
@@ -118,9 +147,39 @@ def download(model: LiveModel | PunctModel, progress: Callable[[int, int], None]
     return model.path
 
 
+def _download_hub(model: HubModel, progress) -> Path:
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    staging = MODELS_DIR / f".{model.name}.partial"
+    staging.mkdir(exist_ok=True)
+    base = f"{model.url}/resolve/main"
+    sizes = {}
+    for f in model.files:
+        req = urllib.request.Request(f"{base}/{f}", method="HEAD", headers={"User-Agent": "Live-Subtitles"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            sizes[f] = int(resp.headers.get("X-Linked-Size") or resp.headers.get("Content-Length") or 0)
+    total, done = sum(sizes.values()), 0
+    for f in model.files:
+        dst = staging / f
+        if dst.is_file() and dst.stat().st_size == sizes[f]:      # resume after an interruption
+            done += sizes[f]
+            continue
+        logger.info("Downloading %s/%s", base, f)
+        req = urllib.request.Request(f"{base}/{f}", headers={"User-Agent": "Live-Subtitles"})
+        with urllib.request.urlopen(req, timeout=60) as resp, open(dst, "wb") as out:
+            reader = _ProgressReader(resp, total, progress, done)
+            shutil.copyfileobj(reader, out, 1 << 20)
+            done = reader._done
+    shutil.rmtree(model.path, ignore_errors=True)
+    staging.replace(model.path)
+    if not model.is_installed():
+        raise RuntimeError(f"Downloaded model is missing files: {model.path}")
+    logger.info("Installed %s", model.path)
+    return model.path
+
+
 class _ProgressReader:
-    def __init__(self, raw, total: int, progress):
-        self._raw, self._total, self._progress, self._done = raw, total, progress, 0
+    def __init__(self, raw, total: int, progress, done: int = 0):
+        self._raw, self._total, self._progress, self._done = raw, total, progress, done
 
     def read(self, size: int = -1) -> bytes:
         chunk = self._raw.read(size)

@@ -20,6 +20,7 @@ from .capture import LoopbackCapture, list_output_devices
 from .captions import CaptionBuilder
 from .hotkeys import HotkeyManager
 from .jobs import VIDEO_FILTER, JobsWindow
+from .engines import NemotronEngine
 from .live import LiveRecognizer
 from .overlay import CaptionOverlay
 from .paths import LOG_DIR, ensure_dirs
@@ -33,7 +34,7 @@ INSTANCE_KEY = f"{APP_NAME}-{os.environ.get('USERNAME', 'user')}"
 class LiveController(QObject):
     """Starts/stops capture + recogniser off the UI thread. Signals arrive on the UI thread."""
 
-    words = Signal(list, str)
+    words = Signal(list, list)
     state = Signal(str, str)              # off | loading | live | error, detail
 
     def __init__(self, settings: settings_mod.Settings):
@@ -43,6 +44,7 @@ class LiveController(QObject):
         self.recognizer: LiveRecognizer | None = None
         self.running = False
         self.punctuator = None
+        self.engine_label = ""                # "GPU" / "CPU", for the status line
         self._gen = 0
         self._lock = threading.Lock()
 
@@ -77,43 +79,39 @@ class LiveController(QObject):
 
     def _start(self, gen: int) -> None:
         eng = self.s.engine
-        model = models.live_model(eng.language, eng.latency_ms)
         try:
-            if not model.is_installed():
-                last = [-1]
-
-                def progress(done, total):
-                    pct = int(done * 100 / total) if total else 0
-                    if pct != last[0] and gen == self._gen:
-                        last[0] = pct
-                        self.state.emit("loading", f"Downloading speech model… {pct}%")
-
-                models.download(model, progress)
-            punctuator = None
-            if eng.punctuation and eng.language == "en":
+            engine, punctuator, note = None, None, ""
+            if eng.language == "en" and eng.recognizer in ("auto", "gpu"):
                 try:
-                    if not models.PUNCT_MODEL.is_installed():
-                        self.state.emit("loading", "Downloading punctuation model…")
-                        models.download(models.PUNCT_MODEL)
-                    from .punctuate import Punctuator
-
-                    punctuator = Punctuator()
-                except Exception:
-                    # Captions still work with the speech model's own punctuation.
-                    logger.exception("Punctuation model unavailable")
+                    engine = self._gpu_engine(gen)
+                except Exception as exc:
+                    if eng.recognizer == "gpu":
+                        raise
+                    logger.warning("GPU recogniser unavailable, using the CPU: %s", exc)
+                    note = "GPU unavailable, using the CPU"
             if gen != self._gen:
+                if engine:
+                    engine.close()
+                return
+            if engine is None:
+                engine, punctuator = self._cpu_engine(gen)
+            self.engine_label = "GPU" if engine.__class__.__name__ == "UnifiedEngine" else "CPU"
+            if gen != self._gen:
+                getattr(engine, "close", lambda: None)()
                 return
             self.punctuator = punctuator
-            self.state.emit("loading", "Loading speech model…")
             capture = LoopbackCapture(eng.device, eng.dialogue_boost)
+            where = note or self.engine_label         # device_label is known once capture starts
             recognizer = LiveRecognizer(
-                model, eng.threads, capture.chunks,
-                on_words=lambda c, p: gen == self._gen and self.words.emit(c, p),
-                on_ready=lambda: gen == self._gen and self.state.emit("live", f"Listening to {capture.device_label}"),
+                engine, capture.chunks,
+                on_words=lambda c, p, _phrase: gen == self._gen and self.words.emit(c, p),
+                on_ready=lambda: gen == self._gen and self.state.emit(
+                    "live", f"Listening to {capture.device_label}  ·  {where}"),
                 on_error=lambda m: gen == self._gen and self._fail(m),
             )
             with self._lock:
                 if gen != self._gen:
+                    getattr(engine, "close", lambda: None)()
                     return
                 capture.start()
                 self.capture, self.recognizer = capture, recognizer
@@ -122,6 +120,52 @@ class LiveController(QObject):
             logger.exception("Could not start live subtitles")
             if gen == self._gen:
                 self._fail(str(exc))
+
+    def _progress(self, gen: int, what: str):
+        last = [-1]
+
+        def progress(done, total):
+            pct = int(done * 100 / total) if total else 0
+            if pct != last[0] and gen == self._gen:
+                last[0] = pct
+                self.state.emit("loading", f"Downloading {what}… {pct}%")
+
+        return progress
+
+    def _gpu_engine(self, gen: int):
+        """Parakeet-unified in its worker process; raises when there is no usable GPU."""
+        from .unified import UnifiedEngine, cuda_available
+
+        self.state.emit("loading", "Checking the GPU…")
+        ok, why = cuda_available()
+        if not ok:
+            raise RuntimeError(why)
+        if not models.UNIFIED_MODEL.is_installed():
+            models.download(models.UNIFIED_MODEL, self._progress(gen, "the GPU speech model (2.5 GB)"))
+        self.state.emit("loading", "Loading the speech model on the GPU…")
+        engine = UnifiedEngine()
+        engine.load()
+        return engine
+
+    def _cpu_engine(self, gen: int):
+        eng = self.s.engine
+        model = models.live_model(eng.language, eng.latency_ms)
+        if not model.is_installed():
+            models.download(model, self._progress(gen, "speech model"))
+        punctuator = None
+        if eng.punctuation and eng.language == "en":
+            try:
+                if not models.PUNCT_MODEL.is_installed():
+                    self.state.emit("loading", "Downloading punctuation model…")
+                    models.download(models.PUNCT_MODEL)
+                from .punctuate import Punctuator
+
+                punctuator = Punctuator()
+            except Exception:
+                # Captions still work with the speech model's own punctuation.
+                logger.exception("Punctuation model unavailable")
+        self.state.emit("loading", "Loading speech model…")
+        return NemotronEngine(model, eng.threads), punctuator
 
     def _fail(self, message: str) -> None:
         self.running = False
@@ -170,6 +214,7 @@ class App(QObject):
     def run(self) -> None:
         self._configure_builder()
         self.tray.set_flags(self.s.layout.visible, self.s.layout.locked)
+        self.overlay.set_status(f"Live subtitles are off  ·  {self.s.hotkeys.toggle} to start")
         self.tray.show()
         if self.s.layout.visible:
             self.overlay.show()
@@ -205,7 +250,7 @@ class App(QObject):
         else:
             self.live.start()
 
-    def _on_words(self, committed: list, pending: str) -> None:
+    def _on_words(self, committed: list, pending: list) -> None:
         self.builder.add(committed, pending, time.monotonic())
         self._show_lines()
 
@@ -218,6 +263,12 @@ class App(QObject):
 
     def _on_state(self, state: str, detail: str) -> None:
         self.tray.set_state(state, detail)
+        self.overlay.set_status({
+            "off": f"Live subtitles are off  ·  {self.s.hotkeys.toggle} to start",
+            "loading": detail or "Starting…",
+            "live": detail or "Listening",
+            "error": f"Stopped: {detail}"[:90],
+        }.get(state, detail))
         if state == "error":
             self.tray.notify("Live subtitles stopped", detail, error=True)
         if state == "live":
@@ -293,13 +344,19 @@ class App(QObject):
     def _update_model_status(self, detail: str = "") -> None:
         if not self.settings_window:
             return
-        model = models.live_model(self.s.engine.language, self.s.engine.latency_ms)
+        eng = self.s.engine
+        gpu = eng.language == "en" and eng.recognizer in ("auto", "gpu")
+        cpu = models.live_model(eng.language, eng.latency_ms)
         if detail:
             text = detail
-        elif model.is_installed():
-            text = f"Model installed: {model.name}"
-        else:
+        elif self.live.running and self.live.engine_label:
+            text = f"Running on the {self.live.engine_label}."
+        elif gpu and not models.UNIFIED_MODEL.is_installed():
+            text = "The GPU model downloads (2.5 GB) the next time live subtitles start."
+        elif not gpu and not cpu.is_installed():
             text = "This model downloads (~470 MB) the next time live subtitles start."
+        else:
+            text = f"Model installed: {models.UNIFIED_MODEL.name if gpu else cpu.name}"
         self.settings_window.set_model_status(text)
 
     def show_settings(self) -> None:

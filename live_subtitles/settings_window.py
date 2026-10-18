@@ -295,11 +295,15 @@ class SettingsWindow(QWidget):
         f = QFormLayout(g)
         f.addRow("Language", self._bind("language", self._combo(
             [(label, code) for code, label in models.LANGUAGES.items()]), "engine", "language"))
-        f.addRow("Latency", self._bind("latency", self._combo(
-            [("Fastest: words ~0.3 s after speech", 160),
-             ("Balanced: ~0.6 s, slightly more accurate", 560),
-             ("Most accurate: ~1 s", 1120)]), "engine", "latency_ms"))
-        f.addRow("", self._bind("punct", QCheckBox("Better punctuation and capitals (English, 31 MB model)"),
+        f.addRow("Recogniser", self._bind("recognizer", self._combo(
+            [("Automatic: GPU when available, else CPU", "auto"),
+             ("GPU: Parakeet-unified (NVIDIA CUDA)", "gpu"),
+             ("CPU: Nemotron streaming", "cpu")]), "engine", "recognizer"))
+        f.addRow("CPU latency", self._bind("latency", self._combo(
+            [("Balanced: words ~0.5 s after speech", 560),
+             ("Fastest: ~0.3 s, needs a strong CPU", 160),
+             ("Lightest: ~1 s", 1120)]), "engine", "latency_ms"))
+        f.addRow("", self._bind("punct", QCheckBox("Better punctuation and capitals on the CPU (31 MB model)"),
                                 "engine", "punctuation"))
         f.addRow("CPU threads", self._bind("threads", self._spin(1, 16), "engine", "threads"))
         f.addRow("", self._bind("autostart", QCheckBox("Start live subtitles when the app starts"),
@@ -307,9 +311,10 @@ class SettingsWindow(QWidget):
         self.model_status = QLabel()
         self.model_status.setWordWrap(True)
         f.addRow(self.model_status)
-        note = QLabel("English uses NVIDIA's English Nemotron streaming model; other languages and "
-                      "auto-detect use the multilingual Nemotron 3.5. Each language/latency pair is "
-                      "a separate ~470 MB download, fetched the first time it is used.")
+        note = QLabel("English runs NVIDIA Parakeet-unified on an NVIDIA GPU (2.5 GB download, most "
+                      "accurate, light on the CPU). Without one, and for other languages, captions run "
+                      "on the CPU with NVIDIA's Nemotron streaming models (~470 MB per language and "
+                      "latency). Models download the first time they are used.")
         note.setWordWrap(True)
         f.addRow(note)
         col.addWidget(g)

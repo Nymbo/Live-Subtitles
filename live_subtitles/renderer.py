@@ -52,9 +52,25 @@ def text_width_fn(ap: Appearance, width: float):
 
 
 def paint_captions(p: QPainter, rect: QRectF, lines: list[str], ap: Appearance,
-                   opacity: float = 1.0) -> None:
+                   opacity: float = 1.0, scroll: float = 0.0, outgoing: str | None = None) -> None:
+    """Draw `lines` bottom-anchored in `rect`.
+
+    Roll-up animation: with `scroll` in (0, 1] every line sits that fraction of a line
+    lower than its resting place, and `outgoing` (the line that just scrolled off) is drawn
+    above the first line, fading with `scroll`. Animating scroll 1 -> 0 slides the block up.
+    """
     if not lines:
         return
+    if outgoing and scroll > 0:
+        p.save()
+        p.setClipRect(rect)
+        _paint_lines(p, rect, [outgoing], ap, opacity * scroll * scroll, (scroll - 1.0) - (len(lines) - 1))
+        p.restore()
+    _paint_lines(p, rect, lines, ap, opacity, scroll)
+
+
+def _paint_lines(p: QPainter, rect: QRectF, lines: list[str], ap: Appearance, opacity: float,
+                 shift_lines: float) -> None:
     p.save()
     p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
     p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
@@ -66,12 +82,14 @@ def paint_captions(p: QPainter, rect: QRectF, lines: list[str], ap: Appearance,
     texts = [t.upper() if ap.uppercase else t for t in lines]
 
     # Bottom-anchored: the newest line sits on the same baseline as lines roll up.
-    last_baseline = rect.bottom() - margin - ap.padding_y - fm.descent()
+    last_baseline = rect.bottom() - margin - ap.padding_y - fm.descent() + shift_lines * step
     left, right = rect.left() + margin + ap.padding_x, rect.right() - margin - ap.padding_x
     glyphs = QPainterPath()
     boxes: list[QRectF] = []
     for i, text in enumerate(texts):
         baseline = last_baseline - (len(texts) - 1 - i) * step
+        if not text:          # a blank line keeps its slot but draws nothing (no empty box)
+            continue
         w = fm.horizontalAdvance(text)
         if ap.align == "left":
             x = left
@@ -84,7 +102,7 @@ def paint_captions(p: QPainter, rect: QRectF, lines: list[str], ap: Appearance,
         boxes.append(QRectF(x - ap.padding_x, top - ap.padding_y, w + 2 * ap.padding_x,
                             fm.height() + 2 * ap.padding_y))
 
-    if ap.background in ("line", "block"):
+    if ap.background in ("line", "block") and boxes:
         bg = QPainterPath()
         r = ap.corner_radius
         if ap.background == "block":
