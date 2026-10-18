@@ -103,7 +103,7 @@ class SettingsWindow(QWidget):
 
     def __init__(self, settings: Settings, devices_fn):
         super().__init__(None, Qt.WindowType.Window)
-        self.setWindowTitle("Live-Subtitles settings")
+        self.setWindowTitle("Live Subtitles settings")
         self.resize(760, 820)
         self.s = settings
         self.devices_fn = devices_fn

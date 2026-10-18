@@ -116,7 +116,7 @@ class JobsWindow(QWidget):
 
     def __init__(self):
         super().__init__(None)
-        self.setWindowTitle("Live-Subtitles: subtitle jobs")
+        self.setWindowTitle("Live Subtitles: subtitle jobs")
         self.resize(620, 360)
         self.rows: dict[str, JobRow] = {}
         self.queue: list[Batch] = []

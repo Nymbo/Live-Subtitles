@@ -1,32 +1,43 @@
-# Live-Subtitles
+# Live Subtitles
 
-On-screen subtitles for whatever Windows is playing (a stream, a video, a call), drawn
-in a draggable, fully styleable overlay. Also writes real subtitle files (SRT, ASS, WebVTT)
-for video files on disk, for VLC and other players.
+Live captions for whatever Windows is playing (a stream, a film, a call, a game), drawn
+in a draggable, fully styleable overlay that disappears when nobody is talking. For the
+times there are no subtitles at all. It also writes real subtitle files (SRT, ASS,
+WebVTT) for video files on disk, for VLC and other players.
 
-A tray app, not a Gradio Space. Windows only (WASAPI loopback capture).
+Everything runs locally. English captions use NVIDIA's Parakeet-unified on an NVIDIA GPU
+(about 0.4 s behind speech, under one CPU core), or Nemotron streaming on the CPU when
+there is no GPU and for 30 other languages. See [Models, and why](#models-and-why) for
+the benchmark behind those choices.
 
-## Run
+A Windows tray app (WASAPI loopback capture).
+
+## Install
+
+Needs Windows 10 or 11, Python 3.13 and [uv](https://docs.astral.sh/uv/). For the GPU
+engine, an NVIDIA GPU with ~3.2 GB of free VRAM and a current driver; CUDA itself comes
+from pip. For subtitle files, ffmpeg and ffprobe on PATH.
 
 ```powershell
-cd P:\Repos\HF-Dev
-.\scripts\setup-app-env.ps1 -AppName "Live-Subtitles"     # once
-.\scripts\launch-app.ps1 -AppName "Live-Subtitles"         # tray app
+git clone https://github.com/Nymbo/Live-Subtitles.git
+cd Live-Subtitles
+.\setup.ps1
+.\.venv\Scripts\pythonw.exe run.pyw          # the tray app, no console window
 ```
 
-No console window: `.\Live-Subtitles\.venv\Scripts\pythonw.exe .\Live-Subtitles\run.pyw`
-(run from `Live-Subtitles\`). A second launch opens the running copy's settings.
+`.\.venv\Scripts\python.exe -m live_subtitles` runs it with a console (log output). A
+second launch opens the running copy's settings. The speech model downloads on first use
+(2.5 GB for the GPU engine, ~470 MB for a CPU model) into `%LOCALAPPDATA%\Live-Subtitles`.
 
 Subtitle files without the GUI:
 
 ```powershell
-cd P:\Repos\HF-Dev\Live-Subtitles
 .\.venv\Scripts\python.exe -m live_subtitles transcribe "D:\Movies\film.mkv" --formats srt,ass
 ```
 
-ffmpeg and ffprobe must be on PATH. Files land next to the video as `film.srt`, which VLC
-loads automatically. An existing `film.srt` is never overwritten unless you ask; the new
-file becomes `film.live-subtitles.srt` instead.
+Files land next to the video as `film.srt`, which VLC loads automatically. An existing
+`film.srt` is never overwritten unless you ask; the new file becomes
+`film.live-subtitles.srt` instead.
 
 ## Using it
 
@@ -124,7 +135,6 @@ What that decided:
 ## Benchmark
 
 ```powershell
-cd P:\Repos\HF-Dev\Live-Subtitles
 .\.venv\Scripts\python.exe -m bench.testset              # synthetic scenes + Tears of Steel
 uv run --no-project --with pyarrow --with huggingface_hub --with numpy python -m bench.realset fetch
 .\.venv\Scripts\python.exe -m bench.realset build        # real-world scenes
@@ -172,6 +182,8 @@ live_subtitles/
   jobs.py             runs file transcription in a child process, progress window
   transcribe.py       video -> Parakeet -> cues -> SRT/ASS/VTT (CLI entry point)
   subtitles.py        cue building (2x42 chars, reading speed) and file writers
+run.pyw               tray launcher (pythonw, no console)
+setup.ps1             builds .venv with uv
 tests/test_core.py    unit tests for the pure-Python parts
 bench/                live-caption benchmark: scenes, runner, report, real-time load
 ```
@@ -190,3 +202,10 @@ bench/                live-caption benchmark: scenes, runner, report, real-time 
   one, captions run on the CPU (Nemotron), which punctuates less well.
 - A sentence's final period appears once the next sentence starts: the model can't know
   the sentence ended until then.
+
+## Licence
+
+The code is MIT-licensed (see `LICENSE`). The speech models are not part of this
+repository; they download on first use under their own licences: NVIDIA's Parakeet and
+Nemotron models under the terms on their Hugging Face model cards, sherpa-onnx's exports
+and punctuation model under sherpa-onnx's.

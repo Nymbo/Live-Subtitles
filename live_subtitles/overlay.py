@@ -55,7 +55,7 @@ class CaptionOverlay(QWidget):
 
     def __init__(self, appearance: Appearance, layout: Layout):
         super().__init__(None)
-        self.setWindowTitle("Live-Subtitles overlay")
+        self.setWindowTitle("Live Subtitles overlay")
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
                             | Qt.WindowType.Tool | Qt.WindowType.NoDropShadowWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)

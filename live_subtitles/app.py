@@ -14,7 +14,7 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QFileDialog
 
-from . import APP_NAME, __version__, models
+from . import APP_NAME, DISPLAY_NAME, __version__, models
 from . import settings as settings_mod
 from .capture import LoopbackCapture, list_output_devices
 from .captions import CaptionBuilder
@@ -223,7 +223,7 @@ class App(QObject):
         if self.s.engine.autostart:
             self.live.start()
         else:
-            self.tray.notify(APP_NAME, f"Ready. Click the tray icon or press {self.s.hotkeys.toggle} to start.")
+            self.tray.notify(DISPLAY_NAME, f"Ready. Click the tray icon or press {self.s.hotkeys.toggle} to start.")
 
     def quit(self) -> None:
         self.live.stop()
@@ -339,7 +339,7 @@ class App(QObject):
         if self.settings_window:
             self.settings_window.set_hotkey_failures(failed)
         elif failed:
-            self.tray.notify(APP_NAME, "Some hotkeys are taken by another program; change them in Settings.", True)
+            self.tray.notify(DISPLAY_NAME, "Some hotkeys are taken by another program; change them in Settings.", True)
 
     def _update_model_status(self, detail: str = "") -> None:
         if not self.settings_window:
@@ -393,6 +393,7 @@ def main(open_settings: bool = False) -> int:
     _setup_logging()
     qapp = QApplication(sys.argv)
     qapp.setApplicationName(APP_NAME)
+    qapp.setApplicationDisplayName(DISPLAY_NAME)
     qapp.setQuitOnLastWindowClosed(False)
 
     # Single instance: a second launch just opens the first one's settings.
@@ -406,7 +407,7 @@ def main(open_settings: bool = False) -> int:
     server = QLocalServer()
     server.listen(INSTANCE_KEY)
 
-    logger.info("%s %s starting", APP_NAME, __version__)
+    logger.info("%s %s starting", DISPLAY_NAME, __version__)
     app = App(qapp)
     server.newConnection.connect(lambda: (server.nextPendingConnection(), app.show_settings()))
     app.run()

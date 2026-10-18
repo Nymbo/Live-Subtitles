@@ -47,7 +47,7 @@ class Tray(QObject):
         self.icons = {s: make_icon(s) for s in STATE_COLORS}
         self.tray = QSystemTrayIcon(self.icons["off"])
         self.menu = QMenu()
-        self.header = self.menu.addAction("Live-Subtitles")
+        self.header = self.menu.addAction("Live Subtitles")
         self.header.setEnabled(False)
         self.menu.addSeparator()
         self.toggle_action = self.menu.addAction("Start live subtitles", self.toggle_requested.emit)
@@ -64,7 +64,7 @@ class Tray(QObject):
         self.menu.addAction("Exit", self.quit_requested.emit)
         self.tray.setContextMenu(self.menu)
         self.tray.activated.connect(self._activated)
-        self.tray.setToolTip("Live-Subtitles: off")
+        self.tray.setToolTip("Live Subtitles: off")
         self._click_timer = QTimer(self, singleShot=True, timeout=self.toggle_requested.emit)
 
     def _check(self, text: str, slot) -> QAction:
@@ -82,7 +82,7 @@ class Tray(QObject):
     def set_state(self, state: str, detail: str = "") -> None:
         self.tray.setIcon(self.icons.get(state, self.icons["off"]))
         label = {"off": "off", "loading": "starting", "live": "live", "error": "error"}.get(state, state)
-        self.tray.setToolTip(f"Live-Subtitles: {label}" + (f"\n{detail}" if detail else ""))
+        self.tray.setToolTip(f"Live Subtitles: {label}" + (f"\n{detail}" if detail else ""))
         self.toggle_action.setText("Stop live subtitles" if state in ("live", "loading")
                                    else "Start live subtitles")
 

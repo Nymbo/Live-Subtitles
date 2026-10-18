@@ -1,4 +1,4 @@
-"""Launcher for Live-Subtitles; run with pythonw.exe for no console window."""
+"""Launcher for Live Subtitles; run with pythonw.exe for no console window."""
 
 import sys
 

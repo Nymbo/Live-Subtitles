@@ -1,0 +1,11 @@
+# Python environment and caches
+.venv/
+.uv-cache/
+__pycache__/
+*.py[cod]
+
+# Editors and OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
