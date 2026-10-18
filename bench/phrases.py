@@ -121,7 +121,8 @@ def main() -> None:
         hyp_tok = M.tokens(" ".join(hyp))
         ref_n, hyp_n = [x for x, _ in ref_tok], [x for x, _ in hyp_tok]
         pairs = M.align(ref_n, hyp_n)
-        row = {"backend": args.backend, "scene": scene, **M.wer(ref_n, hyp_n, pairs),
+        row = {"backend": args.backend, "scene": scene,
+               **M.text_wer(" ".join(s["text"] for s in segs), " ".join(hyp)),
                "sentence_f1": M.sentence_f1([r for _, r in ref_tok], [h for _, h in hyp_tok], pairs,
                                             ends if meta["kind"] == "synthetic" else None),
                "phrases": len(times), "ms_p50": round(float(np.median(times)) * 1000),

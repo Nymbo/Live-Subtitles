@@ -39,6 +39,8 @@ SYNTHETIC = ("clean", "music", "action", "quiet", "overlap")
 REAL = ("tos", "tv-meanwhile", "pod-crimetown", "pod-podsave", "pod-murder-live", "call-nigeria", "call-china",
         "call-brazil", "call-australia", "talk-mead", "talk-cameron")
 SCENES = SYNTHETIC + REAL
+# `realset build --full`: the cut recordings, whole. Not in SCENES (about 6.5 hours).
+FULL = tuple(f"full-{s}" for s in REAL if s.startswith(("pod-", "call-", "talk-")))
 RESULTS = BENCH_DIR / "results"
 
 
@@ -257,7 +259,8 @@ def score(meta: dict, builder: CaptionBuilder, rec: Recorder, dur: float, extra:
             ref_ends.add(len(ref_tok) - 1)
     ref_n, hyp_n = [a for a, _ in ref_tok], [a for a, _ in hyp_tok]
     pairs = M.align(ref_n, hyp_n)
-    out = {"scene": meta["name"], "duration_s": round(dur, 1), **M.wer(ref_n, hyp_n, pairs)}
+    out = {"scene": meta["name"], "duration_s": round(dur, 1),
+           **M.text_wer(" ".join(s["text"] for s in ordered), " ".join(hyp))}
     out["sentence_f1"] = M.sentence_f1([b for _, b in ref_tok], [b for _, b in hyp_tok], pairs,
                                        ref_ends if meta["kind"] == "synthetic" else None)
 

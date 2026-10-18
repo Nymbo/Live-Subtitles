@@ -77,20 +77,31 @@ audio, each run through the app's own caption pipeline on a simulated real-time 
 
 | Live engine (English) | WER, real-world | WER, synthetic | Sentence F1 | Words on screen p50 / p90 | Speed | CPU |
 |---|---|---|---|---|---|---|
-| **Parakeet-unified, GPU** (default) | **13.8%** | 17.4% | **0.60** | 0.36 / 0.61 s | 0.28x real time | **0.8 cores** |
-| Nemotron streaming 560 ms, CPU (fallback) | 17.0% | **14.9%** | 0.40 | 0.40 / 0.81 s | 0.21x | 9.4 cores at 4 threads; 1.9 at 2 |
-| Nemotron streaming 160 ms, CPU | 17.6% | 15.0% | 0.37 | **0.21 / 0.54 s** | 0.44x | 9.3 cores |
+| **Parakeet-unified, GPU** (default) | 12.1% | 16.3% | **0.60** | 0.36 / 0.61 s | 0.28x real time | **0.8 cores** |
+| Nemotron streaming 560 ms, CPU (fallback) | **11.4%** | **15.0%** | 0.40 | 0.40 / 0.81 s | 0.21x | 9.4 cores at 4 threads; 1.9 at 2 |
+| Nemotron streaming 160 ms, CPU | 12.1% | 15.1% | 0.37 | **0.21 / 0.54 s** | 0.44x | 9.3 cores |
 
-Per real-world scene (WER %, Parakeet-unified vs Nemotron 560): TV monologue 6.3 vs 6.5;
-podcasts 16.4 / 10.0 / 9.2 vs 19.0 / 12.6 / 8.8; earnings calls from Nigeria, China,
-Brazil and Australia 14.0 / 16.2 / 22.2 / 18.2 vs 22.7 / 33.7 / 22.5 / 23.1; TED talks
-5.0 / 7.2 vs 4.6 / 5.6; *Tears of Steel* 27.5 vs 28.1. Real-time load with a film playing
+WER is scored on Whisper's English normalisation of both texts, as the Open ASR
+Leaderboard does. Until 2026-10-18 the benchmark scored without it, which counted
+Nemotron's spelled-out numbers ("twenty twenty one" for "2021") as errors and made
+Parakeet-unified look well ahead (13.8% vs 17.0%); `bench.run` still reports that older
+score as `wer_plain`.
+
+Per real-world scene (WER %, Parakeet-unified vs Nemotron 560): TV monologue 6.3 vs 6.2;
+podcasts 14.9 / 9.3 / 8.4 vs 16.6 / 9.8 / 8.5; earnings calls from Nigeria, China,
+Brazil and Australia 11.1 / 12.5 / 19.0 / 14.5 vs 10.4 / 12.5 / 18.5 / 11.9; TED talks
+4.5 / 6.9 vs 3.3 / 3.7; *Tears of Steel* 25.6 vs 24.0. Scored on the nine cut recordings
+whole instead (6.5 hours, no excerpt cuts), the result holds: Parakeet-unified 11.7% vs
+Nemotron 10.8%, Nemotron ahead on all but the Crimetown podcast. Most of Parakeet-unified's
+extra errors are dropped words (more deletions on 8 of the 9). Real-time load with a film playing
 (`bench.cpu`): Parakeet-unified used 0.3 CPU cores across both processes and about 20% of
 a GTX 1070; neither engine fell behind.
 
 What that decided:
 
-- **Parakeet-unified on the GPU is the default.** It is trained for streaming and offline
+- **Parakeet-unified on the GPU is the default.** Its accuracy is close to Nemotron's
+  (12.1% vs 11.4% WER) rather than better; it wins on punctuation, on the slowest words
+  (p90 delay) and on leaving the CPU free. It is trained for streaming and offline
   use at once and punctuates and capitalises itself, so captions need no separate
   punctuation model. sherpa-onnx exports it as *buffered* streaming: every 240 ms the
   whole encoder re-reads 5.6 s of left context plus 160 ms of lookahead and decodes only
@@ -98,7 +109,7 @@ What that decided:
   the fp32 export (2.5 GB, downloaded on first use) takes ~65 ms per step on a GTX 1070.
   The int8 export is slower on that GPU (its ops fall back to the CPU), and Pascal has no
   fast fp16. Shorter left context was faster but lost accuracy on film audio (*Tears of
-  Steel*: 27.5% at 5.6 s, 33.7% at 3.2 s, 37.0% at 2.4 s).
+  Steel*: 25.6% at 5.6 s, 30.3% at 3.2 s, 33.9% at 2.4 s).
 - **It runs in a worker process** (`python -m live_subtitles unified-worker`), because
   onnxruntime-gpu and sherpa-onnx cannot share a process (see below), and so the decode
   loop stays off the UI's GIL. Its CPU sessions are capped and don't spin-wait.
@@ -106,12 +117,13 @@ What that decided:
   starts, so the newest word stays "in progress" (shown, not committed) through a pause
   and the period attaches to it. Committing it on a timer left periods as words of their own.
 - **The input leveller stays on** for both engines (slow AGC toward -23 dBFS, no boost for
-  near-silence). For Parakeet-unified it took the China call from 22.0% to 16.2% WER and
-  was neutral elsewhere.
+  near-silence). It helps Parakeet-unified slightly on very quiet speech (11.3% vs 11.9%
+  WER) and is neutral elsewhere, for both engines.
 - **The GPU engine is weaker on two synthetic scenes**: read speech under the loudest
-  effects at 0 dB (28.7% vs 19.7%) and very quiet speech (12.5% vs 8.1%). On the real
-  recordings it won or tied everywhere except the two TED talks. If a film's quiet
-  dialogue goes missing, Settings → Recogniser → CPU is the comparison to try.
+  effects at 0 dB (27.1% vs 20.1%) and very quiet speech (11.3% vs 9.0%). On the real
+  recordings the two are close: Nemotron is ahead on 7 of 11 scenes, Parakeet-unified on
+  the 3 podcasts, and the China call is a tie. If a film's quiet dialogue goes missing,
+  Settings → Recogniser → CPU is the comparison to try.
 - **The CPU fallback is Nemotron 560 ms on 2 threads.** 160 ms was no more accurate and
   needed about 9 cores to stay ahead of real time (it stalled on one scene); 560 ms keeps
   up on 1.9 cores. Nemotron emits final tokens only, so its captions never rewrite.
@@ -122,7 +134,7 @@ What that decided:
   in progress can move. The benchmark counts 0 line jumps and 0 word rewrites per minute
   for both engines (the earlier layout re-broke lines on every punctuation change).
 - **Also measured and rejected:** a two-pass design (Nemotron live, Parakeet re-decoding
-  each phrase after a pause) matched the GPU engine's accuracy but rewrote captions after
+  each phrase after a pause) was about as accurate (11.5-13.2%) but rewrote captions after
   every pause. Whistle 55M has no GPU runtime and its stream fell behind real time.
   Whisper large-v3-turbo took 0.75-1.25 s per pass on the GTX 1070. sherpa-onnx's CUDA
   build has no kernels for Pascal GPUs. VAD gates (Silero, TEN) dropped dialogue under music.
@@ -153,11 +165,14 @@ Scenes, audio and results live in `%LOCALAPPDATA%\Live-Subtitles\bench`.
   stings); three Rev16 podcasts (narrative over music, two hosts, a live show); Earnings-22
   calls from Nigeria, China, Brazil and Australia; two TED-LIUM talks. Long recordings
   are cut to 5-minute excerpts at pauses where Parakeet's timed words agree with the
-  human transcript, and scored against the human transcript.
+  human transcript, and scored against the human transcript. `bench.realset build --full`
+  builds the same recordings uncut (`full-*` scenes, about 6.5 hours), to check that the
+  cuts don't favour one engine.
 - **Your own clips:** `python -m bench.realset local <folder>` turns every video or audio
   file with a same-named `.srt` beside it into a scene.
 
-`bench.run` reports WER, sentence-end F1, delay from the end of each spoken word to it
+`bench.run` reports WER (Whisper-normalised; `bench.report --rescore` re-scores saved
+results after a scorer change), sentence-end F1, delay from the end of each spoken word to it
 appearing and to it being committed, rewrites of text already on screen, line jumps,
 phantom words in silence, speed, CPU and memory. `bench.phrases` compares offline models
 on the same phrase clips (it ruled out the second-pass candidates).
@@ -205,7 +220,9 @@ bench/                live-caption benchmark: scenes, runner, report, real-time 
 
 ## Licence
 
-The code is MIT-licensed (see `LICENSE`). The speech models are not part of this
+The code is MIT-licensed (see `LICENSE`). `bench/whisper_normalizer/` is OpenAI
+Whisper's English text normaliser, MIT-licensed by OpenAI (its own `LICENSE` is beside
+it). The speech models are not part of this
 repository; they download on first use under their own licences: NVIDIA's Parakeet and
 Nemotron models under the terms on their Hugging Face model cards, sherpa-onnx's exports
 and punctuation model under sherpa-onnx's.

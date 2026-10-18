@@ -25,6 +25,10 @@ The transcripts have no timestamps, so `build` runs Parakeet TDT 0.6B v3 offline
 whole recording, aligns its timed words with the human transcript, and cuts each excerpt
 at a pause where the two agree. The excerpt's reference is the human text (scored), and
 Parakeet's word times (where it agrees with the reference) give the delay timing.
+
+`build --full` instead keeps each recording whole and scores it against its whole
+transcript (scenes `full-<name>`, 3 min to 1.8 h each), so no cut depends on Parakeet:
+a check that the excerpt cuts don't favour one engine.
 """
 
 from __future__ import annotations
@@ -131,7 +135,9 @@ def clean_text(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def build_one(name: str, start_s: float, length_s: float) -> None:
+def build_one(name: str, start_s: float, length_s: float, full: bool = False) -> None:
+    """An excerpt cut at clean pauses, or with `full` the whole recording against the whole
+    transcript as scene `full-<name>`: no cut that Parakeet's alignment could bias."""
     from bench import metrics as M
     from bench.testset import read_wav, ref_word_times, save
 
@@ -139,6 +145,8 @@ def build_one(name: str, start_s: float, length_s: float) -> None:
     ref_raw = clean_text((SRC / f"{name}.txt").read_text(encoding="utf-8")).split()
     ref = [(M.norm_word(w), w) for w in ref_raw]
     ref = [(n, w) for n, w in ref if n]
+    if full:
+        start_s, length_s = 0.0, 1e9
     lo = max(0.0, start_s - 30)
     hi = min(audio.size / SR, start_s + length_s + 60)
     words = ref_word_times(audio[int(lo * SR):int(hi * SR)])
@@ -164,7 +172,7 @@ def build_one(name: str, start_s: float, length_s: float) -> None:
         return len(words)
 
     whole = length_s >= 1e8
-    j0 = 0 if start_s <= 0 and 0 in h2r else cut(start_s)
+    j0 = 0 if full or (start_s <= 0 and 0 in h2r) else cut(start_s)
     if whole:
         j1, r1 = len(words), len(ref)
     else:
@@ -174,8 +182,8 @@ def build_one(name: str, start_s: float, length_s: float) -> None:
             r1 = h2r[j1 - 1] + 1
         else:
             r1 = h2r[j1]
-    r0 = h2r[j0] if j0 in h2r else 0
-    t0 = max(0.0, words[j0]["start"] - 0.6)
+    r0 = 0 if full else h2r[j0] if j0 in h2r else 0
+    t0 = 0.0 if full else max(0.0, words[j0]["start"] - 0.6)
     t1 = hi if whole else words[j1 - 1]["end"] + 0.6
     clip = audio[int(t0 * SR):int(t1 * SR)]
 
@@ -197,7 +205,7 @@ def build_one(name: str, start_s: float, length_s: float) -> None:
             cur = []
     ref_words = [{"word": w["word"], "start": w["start"] - t0, "end": w["end"] - t0}
                  for j, w in enumerate(words) if j0 <= j < j1 and j in h2r]
-    save(name, clip, segs, ref_words, "real")
+    save(f"full-{name}" if full else name, clip, segs, ref_words, "real")
 
 
 def local(folder: str, start_s: float, length_s: float) -> None:
@@ -218,7 +226,11 @@ def local(folder: str, start_s: float, length_s: float) -> None:
         save(name, clip, cues, ref_word_times(clip), "film")
 
 
-def build(names: list[str] | None) -> None:
+def build(names: list[str] | None, full: bool = False) -> None:
+    if full:
+        for name in names or SOURCES:
+            build_one(name, 0.0, 1e9, full=True)
+        return
     for name in names or [*SOURCES, "tv-meanwhile"]:
         if name == "tv-meanwhile":
             build_one(name, 0.0, 1e9)
@@ -232,11 +244,12 @@ def main() -> None:
     ap.add_argument("names", nargs="*", help="build: scenes to build (default all); local: the folder")
     ap.add_argument("--start", type=float, default=0.0)
     ap.add_argument("--length", type=float, default=0.0)
+    ap.add_argument("--full", action="store_true", help="build: whole recordings, uncut (full-<name>)")
     args = ap.parse_args()
     if args.step == "fetch":
         fetch()
     elif args.step == "build":
-        build(args.names)
+        build(args.names, args.full)
     else:
         local(args.names[0], args.start, args.length)
 

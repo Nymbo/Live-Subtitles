@@ -14,7 +14,10 @@ choice; read it before changing a model, an engine, or the caption pipeline.
   `engines.py` (Nemotron streaming on the CPU: the fallback, and every other language).
 - `bench/` is the live-caption benchmark: scene builders (`testset.py`, `realset.py`), a
   simulated-clock runner (`run.py`), `report.py`, real-time load (`cpu.py`), and an
-  offline phrase comparison (`phrases.py`).
+  offline phrase comparison (`phrases.py`). WER is scored on Whisper's English normaliser,
+  vendored from openai/whisper in `bench/whisper_normalizer/` (local edits marked
+  "Live-Subtitles change"); after changing the scorer, `bench.report --rescore` re-scores
+  every saved result.
 - `tests/test_core.py` covers the pure-Python parts.
 
 ## Rules that are easy to break
