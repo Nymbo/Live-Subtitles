@@ -20,7 +20,7 @@ import json
 from bench import metrics as M
 from bench.run import BENCH_DIR, FULL, REAL, RESULTS, SYNTHETIC
 
-SUMMARY = ("wer", "wer_plain", "sentence_f1", "delay_seen_p50", "delay_seen_p90", "delay_final_p50", "rewrites_word_per_min",
+SUMMARY = ("wer", "wer_clean", "wer_plain", "sentence_f1", "delay_seen_p50", "delay_seen_p90", "delay_final_p50", "rewrites_word_per_min",
            "line_jumps_per_min", "rtf", "cpu_cores")
 
 
@@ -51,7 +51,7 @@ def rescore() -> None:
     for f in RESULTS.glob("*/*.json"):
         d = json.loads(f.read_text(encoding="utf-8"))
         if isinstance(d, dict) and "text" in d and (BENCH_DIR / f"{d['scene']}.json").exists():
-            d.update(M.text_wer(reference(d["scene"], d["duration_s"]), d["text"]))
+            d.update(M.text_wer(reference(d["scene"], d.get("duration_s")), d["text"]))
             f.write_text(json.dumps(d, indent=1), encoding="utf-8")
             n += 1
     for f in (RESULTS / "phrases").glob("*.json"):       # bench.phrases: rows per backend

@@ -93,14 +93,24 @@ Brazil and Australia 11.1 / 12.5 / 19.0 / 14.5 vs 10.4 / 12.5 / 18.5 / 11.9; TED
 4.5 / 6.9 vs 3.3 / 3.7; *Tears of Steel* 25.6 vs 24.0. Scored on the nine cut recordings
 whole instead (6.5 hours, no excerpt cuts), the result holds: Parakeet-unified 11.7% vs
 Nemotron 10.8%, Nemotron ahead on all but the Crimetown podcast. Most of Parakeet-unified's
-extra errors are dropped words (more deletions on 8 of the 9). Real-time load with a film playing
+extra errors are dropped words (more deletions on 8 of the 9).
+
+Those dropped words are disfluencies, not lost speech. The references are verbatim;
+Nemotron keeps stutters and fillers, and Parakeet-unified writes clean text: "i was [i was]
+out in", "until we [until we] moved", "[you know]". Most of its extra deletions are
+repeats, "you know" and false starts, spread through phrases rather than before pauses.
+With deleted repeats and "you know"/"i mean" not counted (`wer_clean`), the uncut
+recordings tie: 10.2% vs 10.3%. Its raw decoder output scores the same as the caption
+pipeline's on every scene, so the pipeline's in-progress rule loses nothing.
+
+Real-time load with a film playing
 (`bench.cpu`): Parakeet-unified used 0.3 CPU cores across both processes and about 20% of
 a GTX 1070; neither engine fell behind.
 
 What that decided:
 
 - **Parakeet-unified on the GPU is the default.** Its accuracy is close to Nemotron's
-  (12.1% vs 11.4% WER) rather than better; it wins on punctuation, on the slowest words
+  (12.1% vs 11.4% WER, a tie once its cleaned-up disfluencies are excused) rather than better; it wins on punctuation, on the slowest words
   (p90 delay) and on leaving the CPU free. It is trained for streaming and offline
   use at once and punctuates and capitalises itself, so captions need no separate
   punctuation model. sherpa-onnx exports it as *buffered* streaming: every 240 ms the
@@ -172,7 +182,7 @@ Scenes, audio and results live in `%LOCALAPPDATA%\Live-Subtitles\bench`.
   file with a same-named `.srt` beside it into a scene.
 
 `bench.run` reports WER (Whisper-normalised; `bench.report --rescore` re-scores saved
-results after a scorer change), sentence-end F1, delay from the end of each spoken word to it
+results after a scorer change; `wer_clean` excuses deleted disfluencies), sentence-end F1, delay from the end of each spoken word to it
 appearing and to it being committed, rewrites of text already on screen, line jumps,
 phantom words in silence, speed, CPU and memory. `bench.phrases` compares offline models
 on the same phrase clips (it ruled out the second-pass candidates).

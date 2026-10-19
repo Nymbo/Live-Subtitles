@@ -104,10 +104,40 @@ def normalize(text: str) -> list[str]:
     return _whisper(text).split()
 
 
+FILLER_PHRASES = ({"you", "know"}, {"i", "mean"})   # Whisper's normaliser already drops uh/um/hmm
+
+
+def disfluent_deletions(ref: list[str], pairs) -> int:
+    """Deleted reference words that were disfluencies: a run of deleted words that repeats
+    the words right before or after it ("i was [i was] out"), or a lone "you know"/"i mean"."""
+    dels = [a for a, b in pairs if b is None]
+    n = i = 0
+    while i < len(dels):
+        j = i
+        while j + 1 < len(dels) and dels[j + 1] == dels[j] + 1:
+            j += 1
+        a, b = dels[i], dels[j] + 1
+        span, k = ref[a:b], b - a
+        if ref[b:b + k] == span or ref[max(0, a - k):a] == span or (k == 2 and set(span) in FILLER_PHRASES):
+            n += k
+        i = j + 1
+    return n
+
+
 def text_wer(ref_text: str, hyp_text: str) -> dict:
-    """WER on Whisper-normalised text, plus `wer_plain`: the per-word score without it."""
-    plain = wer([n for n, _ in tokens(ref_text)], [n for n, _ in tokens(hyp_text)])["wer"]
-    return {**wer(normalize(ref_text), normalize(hyp_text)), "wer_plain": plain}
+    """WER on Whisper-normalised text, plus `wer_plain` (the per-word score without that
+    normalisation) and `wer_clean` (deleted disfluencies not counted as errors).
+
+    The references are verbatim. A model that writes clean, readable text instead (dropping
+    stutters, repeats and "you know") loses points that a caption reader would not miss;
+    `wer_clean` shows how much of a gap is that style rather than accuracy."""
+    ref, hyp = normalize(ref_text), normalize(hyp_text)
+    pairs = align(ref, hyp)
+    out = wer(ref, hyp, pairs)
+    errors = out["sub"] + out["del"] + out["ins"] - disfluent_deletions(ref, pairs)
+    out["wer_clean"] = round(100 * errors / max(1, len(ref)), 2)
+    out["wer_plain"] = wer([n for n, _ in tokens(ref_text)], [n for n, _ in tokens(hyp_text)])["wer"]
+    return out
 
 
 def pct(values, q) -> float | None:
