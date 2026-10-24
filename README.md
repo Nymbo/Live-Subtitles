@@ -65,6 +65,71 @@ Files land next to the video as `film.srt`, which VLC loads automatically. An ex
 Settings live in `%APPDATA%\Live-Subtitles\settings.json`. Models and logs live in
 `%LOCALAPPDATA%\Live-Subtitles\`.
 
+## Movies and TV
+
+Live captions always trail the speech. For a movie or an episode the subtitles usually
+already exist, timed by a person, so media mode shows those instead: whole lines that
+appear when the line starts, the way subtitles are meant to be read.
+
+It runs by itself while the app is open (tray menu → *Media subtitles for movies and
+TV*, or Ctrl+Alt+V):
+
+1. **What's playing.** The title of the browser or player window in front ("The Bear
+   S02E04", "Dune: Part Two (2024)", a release file name in VLC) is looked up on TMDB, or
+   on IMDb when no TMDB key is set. YouTube, Twitch and the like are ignored. When a page's
+   title names nothing useful, right-click the subtitles → *What is this?* once; the
+   answer is remembered for that site.
+2. **The subtitles.** The cache first, then OpenSubtitles, Wyzie Subs, SubDL and Addic7ed
+   (through Gestdown) in parallel, scored on downloads, uploader trust, sound
+   descriptions and release, with machine translations ranked last. TV works with no
+   account; movies need a key for one of the first three (all free; Settings → Movies &
+   TV, stored DPAPI-encrypted).
+3. **Sync.** The track is checked against what the speakers play. English audio: the
+   media worker recognises ten-second stretches (Parakeet TDT, int8 on the CPU, about 0.7 s
+   each) and matches rare three-word runs against the track's lines. Until that locks, the
+   overlay keeps showing live captions, so there is never a gap. Other languages (Korean,
+   Japanese, ...) with English subtitles: voice activity is cross-correlated with the
+   track's cue spans instead, which takes a couple of minutes of speech; until then the
+   overlay says "Syncing subtitles…" rather than guess.
+4. **Keeping it synced.** Recognition keeps running. Frame-rate mismatches (a 25 fps
+   track on 23.976 fps video drifts 4.3%), seeks and cut scenes all show up as anchors
+   that disagree with the current mapping, and the mapping follows. A track whose words
+   never match what is heard is the wrong episode or cut, and the next candidate is tried.
+5. **No subtitles anywhere.** English: live captions carry on, and what they heard is
+   saved as a track for next time. Other languages: Whisper medium translates each line
+   to English as it finishes (a few seconds late), also saved. With the browser extension,
+   which knows the stream's address, `media-generate` makes the track from the stream
+   ahead of the playhead instead.
+6. **Sound descriptions.** On by default. Tracks with them ([door creaks], speaker names)
+   rank first; turning them off strips them from the same track. Tracks without them get
+   sparse generated cues ([music], [laughter], [phone ringing]) from an AudioSet tagger
+   (AST), placed only in gaps between lines.
+
+Right-click the subtitles for 0.5 s earlier/later (saved per title; also Ctrl+Alt+[ and
+Ctrl+Alt+]), *Wrong subtitles: try others* (Ctrl+Alt+W), and sound descriptions.
+Everything is cached in `%LOCALAPPDATA%\Live-Subtitles\media.db`, so a rewatch starts
+synced.
+
+Measured on Tears of Steel (official SRT, deliberately mistimed by 23.4 s at PAL speed,
+playback started a minute in): text anchors locked within the first lines of dialogue
+and found the frame-rate ratio about two minutes in; from then on lines landed within
+0.03-0.07 s. Speech-span sync on the same film locked after about two minutes of speech,
+0.19 s off.
+
+### The browser extension (optional)
+
+`extension\` is a small Chrome/Edge extension (chrome://extensions → Developer mode →
+Load unpacked). It reports the page's video position, pause and seeks to the app on
+127.0.0.1:47219, plus the stream and subtitle addresses the player requested. With it,
+timing is exact from the first second and survives seeks instantly, and tracks can be
+generated ahead of playback. Without it everything else still works from the audio alone.
+
+Generating a track from a file (or a stream URL) without the app:
+
+```powershell
+.\.venv\Scripts\python.exe -m live_subtitles media-generate "D:\Movies\film.mkv" --start 600 --sounds
+```
+
 ## Models, and why
 
 **English live captions run NVIDIA Parakeet-unified 0.6B on the GPU** (`unified.py`),
@@ -207,9 +272,27 @@ live_subtitles/
   jobs.py             runs file transcription in a child process, progress window
   transcribe.py       video -> Parakeet -> cues -> SRT/ASS/VTT (CLI entry point)
   subtitles.py        cue building (2x42 chars, reading speed) and file writers
+  media/              movies and TV: pre-timed subtitles synced from the audio
+    controller.py     the app side: window title -> track -> sync thread -> overlay lines
+    titles.py         window/page titles -> title, year, season, episode
+    tmdb.py           TMDB lookups (and IMDb's keyless suggestions)
+    sources.py        OpenSubtitles, Wyzie, SubDL, Gestdown; scoring
+    subfile.py        SRT/VTT/ASS parsing, encodings, zips, sound descriptions
+    align.py          text anchors, speech-span correlation, the time map (pure numpy)
+    clock.py          audio clock (counts playing samples) and the extension's clock
+    store.py          media.db: tracks, nudges, rejections, remembered titles
+    worker.py         media-worker process: Parakeet TDT, Silero VAD, Whisper, AST
+    generate.py       media-generate: subtitles from a file or stream, ahead of playback
+    tagger.py         AudioSet sound events (AST) for generated sound descriptions
+    web.py            127.0.0.1 endpoint for the extension
+    dialogs.py        the "What is this?" window
+    winwatch.py       foreground window title and program (Win32)
+    secrets.py        DPAPI encryption for API keys
+extension/            optional Chrome/Edge extension (video position, stream URLs)
 run.pyw               tray launcher (pythonw, no console)
 setup.ps1             builds .venv with uv
 tests/test_core.py    unit tests for the pure-Python parts
+tests/test_media.py   media mode: titles, subtitle files, alignment, clock, cache
 bench/                live-caption benchmark: scenes, runner, report, real-time load
 ```
 
@@ -227,6 +310,14 @@ bench/                live-caption benchmark: scenes, runner, report, real-time 
   one, captions run on the CPU (Nemotron), which punctuates less well.
 - A sentence's final period appears once the next sentence starts: the model can't know
   the sentence ended until then.
+- Media mode without the extension learns the playback position from the audio, so it
+  needs a few lines of dialogue (English) or a couple of minutes of speech (other
+  languages) to lock, and again after a seek. Other sounds playing at the same time (a
+  notification, a second tab) briefly confuse the audio clock until the next lock.
+- Media mode only works while this PC plays the audio (a browser or player on this
+  desktop), since the audio is what it syncs to.
+- Generated translations (no English track anywhere) are Whisper medium's, a few seconds
+  behind live; a person's subtitles are far better when they exist.
 
 ## Licence
 

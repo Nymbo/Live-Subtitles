@@ -18,6 +18,12 @@ choice; read it before changing a model, an engine, or the caption pipeline.
   vendored from openai/whisper in `bench/whisper_normalizer/` (local edits marked
   "Live-Subtitles change"); after changing the scorer, `bench.report --rescore` re-scores
   every saved result.
+- `media/` is media mode (movies and TV): pre-timed subtitle tracks found online and
+  synced from the audio. `controller.py` is the app side; `align.py`, `subfile.py`,
+  `titles.py`, `clock.py`, `store.py` are pure Python with tests in `tests/test_media.py`.
+  Its models run in `python -m live_subtitles media-worker` (`media/worker.py`), tracks
+  from a file or stream in `media-generate`. `extension/` is the optional browser
+  extension that reports the video's position to `media/web.py`.
 - `tests/test_core.py` covers the pure-Python parts.
 
 ## Rules that are easy to break
@@ -26,17 +32,24 @@ choice; read it before changing a model, an engine, or the caption pipeline.
   ships its own `onnxruntime.dll`; `onnxruntime-gpu` (the GPU engine, file transcription)
   ships another with the same name. The tray process imports only sherpa-onnx, never
   `onnxruntime` or `onnx_asr`: the GPU engine runs in `python -m live_subtitles
-  unified-worker`, file transcription in a child process started by `jobs.py`. Importing
-  either in the tray process breaks whichever loads second.
+  unified-worker`, file transcription in a child process started by `jobs.py`, and media
+  mode's models (Parakeet TDT, Silero, Whisper, AST) in `media-worker`. Importing either
+  in the tray process breaks whichever loads second.
 - **Pins for Pascal GPUs** (the dev machine has a GTX 1070): `onnxruntime-gpu` stays below
   1.27 (the first CUDA 13 build drops Pascal) and `nvidia-cudnn-cu12` at 9.10.2.21 (9.11+
   fails on Pascal). sherpa-onnx's CUDA wheels have no Pascal kernels; don't switch to them.
 - **Data lives outside the repo.** Settings in `%APPDATA%\Live-Subtitles`; models, logs,
-  benchmark audio and results in `%LOCALAPPDATA%\Live-Subtitles`. `APP_NAME` names those
+  benchmark audio and results, and media mode's subtitle cache (`media.db`) in
+  `%LOCALAPPDATA%\Live-Subtitles`. API keys in settings are DPAPI blobs
+  (`media/secrets.py`); never put a real key in the repo or a test. `APP_NAME` names those
   folders, so changing it orphans users' settings and models; `DISPLAY_NAME` is the
   user-facing name.
 - **Captions never rewrite.** A committed word's text and line are final; only the words
   still in progress may change. The benchmark's rewrite and line-jump counts should stay 0.
+- **Media cues are never shown at a guessed offset** with only the audio clock to go on.
+  Before a lock, English shows live captions and other languages "Syncing subtitles…";
+  wrong lines are worse than none. Sync thresholds in `media/controller.py` were measured
+  on Tears of Steel (`bench/src`); re-measure before changing them.
 - Measure model or pipeline changes with the benchmark (`bench.run` on all scenes, then
   `bench.report` against the previous label) and update the README's tables.
 

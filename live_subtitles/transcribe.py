@@ -100,11 +100,21 @@ def window_words(result, offset: float) -> list[Word]:
 def transcribe_audio(model, stream, duration: float, window_s: float, overlap_s: float,
                      on_progress=None) -> list[Word]:
     """Read f32le mono from `stream` and transcribe in overlapping windows."""
+    words: list[Word] = []
+    for batch in iter_words(model, stream, duration, window_s, overlap_s, on_progress):
+        words += batch
+    return words
+
+
+def iter_words(model, stream, duration: float, window_s: float = 20.0, overlap_s: float = 4.0,
+               on_progress=None, offset: float = 0.0):
+    """Like transcribe_audio, yielding each window's words as soon as it is decoded
+    (media mode's generator writes cues while it is still running). `offset` is the
+    absolute time of the stream's first sample."""
     win, hop = int(window_s * SR), int((window_s - overlap_s) * SR)
     half = overlap_s / 2
     buf = np.zeros(0, dtype=np.float32)
-    offset = 0.0           # absolute time of buf[0]
-    words: list[Word] = []
+    start = offset
     first = True
     eof = False
     while True:
@@ -122,15 +132,15 @@ def transcribe_audio(model, stream, duration: float, window_s: float, overlap_s:
         res = model.recognize(piece, sample_rate=SR)
         lo = offset if first else offset + half
         hi = offset + piece.size / SR if last else offset + window_s - half
-        words += [w for w in window_words(res, offset) if lo <= w.start < hi]
+        yield [w for w in window_words(res, offset) if lo <= w.start < hi]
         if on_progress:
-            on_progress(min(1.0, (offset + piece.size / SR) / duration) if duration else 0.0)
+            done = offset + piece.size / SR - start
+            on_progress(min(1.0, done / duration) if duration else 0.0)
         if last:
             break
         buf = buf[hop:]
         offset += hop / SR
         first = False
-    return words
 
 
 def output_paths(video: Path, out_dir: Path | None, formats: list[str], overwrite: bool) -> dict[str, Path]:

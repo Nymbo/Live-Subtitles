@@ -8,12 +8,13 @@ from PySide6.QtCore import QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QKeySequence, QLinearGradient, QPainter, QPainterPath
 from PySide6.QtWidgets import (
     QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFontComboBox, QFormLayout, QGroupBox,
-    QHBoxLayout, QInputDialog, QKeySequenceEdit, QLabel, QMessageBox, QPushButton, QSpinBox,
-    QTabWidget, QVBoxLayout, QWidget,
+    QHBoxLayout, QInputDialog, QKeySequenceEdit, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QMessageBox, QPushButton, QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from . import models
 from .captions import CaptionBuilder
+from .media.secrets import protect, unprotect
 from .renderer import block_height, paint_captions, text_width_fn
 from .settings import (PRESETS, Appearance, Settings, appearance_overrides, matching_preset,
                        preset_appearance)
@@ -97,16 +98,19 @@ class Preview(QWidget):
 
 
 class SettingsWindow(QWidget):
-    changed = Signal(str)               # appearance | layout | engine | hotkeys | files
+    changed = Signal(str)               # appearance | layout | engine | hotkeys | files | media
     snap_requested = Signal()
     transcribe_requested = Signal()
+    identify_requested = Signal()
 
-    def __init__(self, settings: Settings, devices_fn):
+    def __init__(self, settings: Settings, devices_fn, media_store_fn=None):
         super().__init__(None, Qt.WindowType.Window)
         self.setWindowTitle("Live Subtitles settings")
         self.resize(760, 820)
         self.s = settings
         self.devices_fn = devices_fn
+        self.media_store_fn = media_store_fn
+        self.secret_edits: dict[str, QLineEdit] = {}
         self._loading = False
         self.widgets: dict[str, QWidget] = {}
 
@@ -127,6 +131,7 @@ class SettingsWindow(QWidget):
         tabs.addTab(self._engine_tab(), "Audio && model")
         tabs.addTab(self._hotkeys_tab(), "Hotkeys")
         tabs.addTab(self._files_tab(), "Video files")
+        tabs.addTab(self._media_tab(), "Movies && TV")
         root.addWidget(tabs, 3)
         self.refresh()
 
@@ -328,7 +333,9 @@ class SettingsWindow(QWidget):
         f = QFormLayout(g)
         self.key_edits: dict[str, QKeySequenceEdit] = {}
         for attr, label in (("toggle", "Start / stop live subtitles"), ("lock", "Lock / unlock overlay"),
-                            ("visibility", "Show / hide subtitles")):
+                            ("visibility", "Show / hide subtitles"),
+                            ("media", "Media subtitles on / off"), ("earlier", "Media subtitles earlier (0.5 s)"),
+                            ("later", "Media subtitles later (0.5 s)"), ("wrong", "Wrong subtitles: try others")):
             edit = QKeySequenceEdit()
             edit.setMaximumSequenceLength(1)
             edit.editingFinished.connect(lambda a=attr: self._store_hotkey(a))
@@ -377,6 +384,117 @@ class SettingsWindow(QWidget):
         col.addWidget(g)
         col.addStretch()
         return page
+
+    def _media_tab(self) -> QWidget:
+        page = QWidget()
+        col = QVBoxLayout(page)
+        g = QGroupBox("Movies and TV")
+        f = QFormLayout(g)
+        f.addRow("", self._bind("m_on", QCheckBox("Show pre-timed subtitles for movies and TV automatically"),
+                                "media", "enabled"))
+        f.addRow("", self._bind("m_sd", QCheckBox("Sound descriptions ([door creaks], speaker names)"),
+                                "media", "sound_descriptions"))
+        f.addRow("", self._bind("m_gen", QCheckBox("Add sound descriptions from the audio when subtitles have none"),
+                                "media", "generated_sounds"))
+        f.addRow("Audio language", self._bind("m_lang", self._combo(
+            [("Automatic (from the title's original language)", "auto"), ("Always English", "en")]),
+            "media", "audio_language"))
+        note = QLabel("While a browser or video player shows a movie or episode, the app finds English "
+                      "subtitles for it, syncs them to what it hears, and shows whole lines ahead of the "
+                      "speech. Korean, Japanese and other audio gets English subtitles too. Nothing to do "
+                      "per title; right-click the subtitles to nudge timing or pick other subtitles.")
+        note.setWordWrap(True)
+        f.addRow(note)
+        ident = QPushButton("What is this?…")
+        ident.clicked.connect(self.identify_requested.emit)
+        f.addRow(ident)
+        col.addWidget(g)
+
+        g = QGroupBox("Accounts (free; stored encrypted for your Windows account)")
+        f = QFormLayout(g)
+        for attr, label, hint in (
+                ("tmdb_key", "TMDB key", "optional: themoviedb.org → Settings → API (surer matches, audio language)"),
+                ("opensubtitles_key", "OpenSubtitles API key", "opensubtitles.com → Consumers"),
+                ("opensubtitles_user", "OpenSubtitles username", "optional: more downloads a day"),
+                ("opensubtitles_password", "OpenSubtitles password", ""),
+                ("wyzie_key", "Wyzie Subs key", "sub.wyzie.io/redeem"),
+                ("subdl_key", "SubDL key", "subdl.com → account → API")):
+            edit = QLineEdit()
+            if attr != "opensubtitles_user":
+                edit.setEchoMode(QLineEdit.EchoMode.Password)
+            edit.setPlaceholderText(hint)
+            edit.editingFinished.connect(lambda a=attr, e=edit: self._store_secret(a, e))
+            self.secret_edits[attr] = edit
+            f.addRow(label, edit)
+        tip = QLabel("TV works with no account at all (Addic7ed, through Gestdown). Movies need one of "
+                     "OpenSubtitles, Wyzie or SubDL. Without a TMDB key titles are looked up on IMDb, "
+                     "which can't tell what language the audio is in until it hears it.")
+        tip.setWordWrap(True)
+        f.addRow(tip)
+        col.addWidget(g)
+
+        g = QGroupBox("Browser extension (optional)")
+        f = QFormLayout(g)
+        f.addRow("", self._bind("m_ext", QCheckBox("Listen for the Live Subtitles extension"), "media", "extension"))
+        f.addRow("Port", self._bind("m_port", self._spin(1024, 65535), "media", "port"))
+        tip = QLabel("The extension (the extension folder in the app's folder, loaded unpacked in Chrome or "
+                     "Edge) reports the video's exact position, so timing is exact from the first second "
+                     "and subtitles can be made ahead of playback.")
+        tip.setWordWrap(True)
+        f.addRow(tip)
+        col.addWidget(g)
+
+        g = QGroupBox("Saved subtitles")
+        v = QVBoxLayout(g)
+        self.saved_list = QListWidget()
+        self.saved_list.setMinimumHeight(110)
+        v.addWidget(self.saved_list, 1)
+        row = QHBoxLayout()
+        reset = QPushButton("Reset timing nudge")
+        reset.clicked.connect(lambda: self._saved_action("reset"))
+        forget = QPushButton("Forget")
+        forget.clicked.connect(lambda: self._saved_action("forget"))
+        row.addStretch()
+        row.addWidget(reset)
+        row.addWidget(forget)
+        v.addLayout(row)
+        col.addWidget(g, 1)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setWidget(page)
+        return scroll
+
+    def _store_secret(self, attr: str, edit: QLineEdit) -> None:
+        value = edit.text().strip()
+        setattr(self.s.media, attr, value if attr == "opensubtitles_user" else protect(value))
+        self.changed.emit("media")
+
+    def _fill_saved(self) -> None:
+        if not hasattr(self, "saved_list"):
+            return
+        self.saved_list.clear()
+        store = self.media_store_fn() if self.media_store_fn else None
+        if store is None:
+            return
+        for key, label, source, nudge, _updated in store.list():
+            src = "generated" if source.startswith("generated:") else source.split(":")[0]
+            text = f"{label}   ·   {src}" + (f"   ·   {nudge:+.1f} s" if nudge else "")
+            item = QListWidgetItem(text)
+            item.setData(Qt.ItemDataRole.UserRole, key)
+            self.saved_list.addItem(item)
+
+    def _saved_action(self, what: str) -> None:
+        item = self.saved_list.currentItem()
+        store = self.media_store_fn() if self.media_store_fn else None
+        if item is None or store is None:
+            return
+        key = item.data(Qt.ItemDataRole.UserRole)
+        if what == "reset":
+            store.update(key, nudge=0.0)
+        else:
+            store.delete(key)
+        self._fill_saved()
 
     # -- presets / special stores ------------------------------------------------------
     def _sync_preset_combo(self) -> None:
@@ -451,7 +569,8 @@ class SettingsWindow(QWidget):
 
     # -- refresh from settings -------------------------------------------------------
     def set_hotkey_failures(self, failed: list[str]) -> None:
-        names = {"toggle": "start/stop", "lock": "lock", "visibility": "show/hide"}
+        names = {"toggle": "start/stop", "lock": "lock", "visibility": "show/hide", "media": "media on/off",
+                 "earlier": "earlier", "later": "later", "wrong": "wrong subtitles"}
         self.hotkey_status.setText("" if not failed else
                                    "Could not register: " + ", ".join(names.get(f, f) for f in failed)
                                    + ". Another program may already use that combination.")
@@ -483,6 +602,10 @@ class SettingsWindow(QWidget):
                 edit.setKeySequence(QKeySequence(getattr(self.s.hotkeys, attr)))
             for fmt, cb in self.format_checks.items():
                 cb.setChecked(fmt in self.s.files.formats)
+            for attr, edit in self.secret_edits.items():
+                value = getattr(self.s.media, attr)
+                edit.setText(value if attr == "opensubtitles_user" else unprotect(value))
+            self._fill_saved()
             self._sync_preset_combo()
         finally:
             self._loading = False

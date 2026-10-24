@@ -22,6 +22,7 @@ from .hotkeys import HotkeyManager
 from .jobs import VIDEO_FILTER, JobsWindow
 from .engines import NemotronEngine
 from .live import LiveRecognizer
+from .media.controller import MediaController
 from .overlay import CaptionOverlay
 from .paths import LOG_DIR, ensure_dirs
 from .renderer import text_width_fn
@@ -187,10 +188,20 @@ class App(QObject):
         self.settings_window = None
         self.jobs = JobsWindow()
         self.jobs.notify.connect(self.tray.notify)
+        self.media = MediaController(self.s)
+        self._bridge_started = False        # live captions started only to bridge media mode
+        self._live_status = ""
+        self._dialog = None
+        self.media.status_changed.connect(self._on_media_status)
+        self.media.bridge_wanted.connect(self._on_bridge)
+        self.media.notify.connect(self.tray.notify)
+        self.media.unknown_title.connect(self._on_unknown_title)
+        self.overlay.menu_extras = self._media_menu
 
         self._save_timer = QTimer(self, singleShot=True, interval=600, timeout=self._save)
         self._restart_timer = QTimer(self, singleShot=True, interval=900, timeout=self.live.restart)
         self._tick = QTimer(self, interval=100, timeout=self._on_tick)
+        self._media_tick = QTimer(self, interval=40, timeout=self._on_media_tick)
 
         self.live.words.connect(self._on_words)
         self.live.state.connect(self._on_state)
@@ -205,6 +216,8 @@ class App(QObject):
         t.visibility_toggled.connect(self.set_visible)
         t.snap_requested.connect(self.overlay.snap_to_default)
         t.transcribe_requested.connect(self.pick_videos)
+        t.media_toggled.connect(self.set_media)
+        t.identify_requested.connect(self.identify)
         t.jobs_requested.connect(lambda: (self.jobs.show(), self.jobs.raise_()))
         t.settings_requested.connect(self.show_settings)
         t.logs_requested.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(LOG_DIR))))
@@ -213,19 +226,24 @@ class App(QObject):
     # -- lifecycle -------------------------------------------------------------------
     def run(self) -> None:
         self._configure_builder()
-        self.tray.set_flags(self.s.layout.visible, self.s.layout.locked)
-        self.overlay.set_status(f"Live subtitles are off  ·  {self.s.hotkeys.toggle} to start")
+        self.tray.set_flags(self.s.layout.visible, self.s.layout.locked, self.s.media.enabled)
+        self._live_status = f"Live subtitles are off  ·  {self.s.hotkeys.toggle} to start"
+        self.overlay.set_status(self._live_status)
         self.tray.show()
         if self.s.layout.visible:
             self.overlay.show()
         self._register_hotkeys()
         self._tick.start()
+        self._media_tick.start()
+        if self.s.media.enabled:
+            self.media.start()
         if self.s.engine.autostart:
             self.live.start()
         else:
             self.tray.notify(DISPLAY_NAME, f"Ready. Click the tray icon or press {self.s.hotkeys.toggle} to start.")
 
     def quit(self) -> None:
+        self.media.shutdown()
         self.live.stop()
         self.hotkeys.clear()
         if self.jobs.busy():
@@ -259,16 +277,114 @@ class App(QObject):
             self._show_lines()
 
     def _show_lines(self) -> None:
-        self.overlay.set_lines(self.builder.display_lines())
+        lines = self.media.lines_now() if self.media.running else None
+        if lines is None:
+            self.overlay.set_min_lines(0)
+            lines = self.builder.display_lines()
+        else:
+            self.overlay.set_min_lines(3)
+            lines = self._wrap(lines)
+        self.overlay.set_lines(lines)
+
+    def _on_media_tick(self) -> None:
+        if self.media.active():
+            self._show_lines()
+
+    def _wrap(self, lines: list[str]) -> list[str]:
+        """Media cues keep their own line breaks unless a line is too wide for the overlay."""
+        fits = text_width_fn(self.s.appearance, self.overlay.width())
+        if all(fits(line) for line in lines):
+            return lines
+        out, current = [], []
+        for word in " ".join(lines).split():
+            if current and not fits(" ".join(current + [word])):
+                out.append(" ".join(current))
+                current = []
+            current.append(word)
+        if current:
+            out.append(" ".join(current))
+        return out
+
+    # -- media subtitles -------------------------------------------------------------
+    def set_media(self, on: bool) -> None:
+        self.s.media.enabled = on
+        if on:
+            self.media.start()
+        else:
+            self.media.stop()
+            self._show_lines()
+        self.tray.set_flags(self.s.layout.visible, self.s.layout.locked, on)
+        if self.settings_window:
+            self.settings_window.refresh()
+        self._queue_save()
+
+    def _on_media_status(self, state: str, text: str) -> None:
+        if state in ("off", "watching") or not text:
+            self.overlay.set_status(self._live_status)
+            if state == "off":
+                self._show_lines()
+        else:
+            self.overlay.set_status(text[:110])
+        logger.info("Media %s %s", state, text)
+
+    def _on_bridge(self, want: bool) -> None:
+        if want and not self.live.running:
+            self._bridge_started = True
+            self.live.start()
+        elif not want and self._bridge_started:
+            self._bridge_started = False
+            if self.live.running:
+                self.live.stop()
+
+    def _on_unknown_title(self, title: str) -> None:
+        self.tray.notify("Not sure what's playing",
+                         "Right-click the subtitles (or the tray icon) and pick What is this? once.")
+
+    def identify(self) -> None:
+        from .media.dialogs import IdentifyDialog
+
+        s = self.media.session
+        title = (s.window_title if s else "") or self.media.last_title
+        dlg = IdentifyDialog(self.s.media, title)
+        dlg.chosen.connect(self.media.identify_manually)
+        self._dialog = dlg
+        dlg.show()
+        dlg.raise_()
+
+    def _media_menu(self, menu) -> None:
+        on = self.media.running
+        act = menu.addAction("Media subtitles for movies and TV", lambda: self.set_media(not on))
+        act.setCheckable(True)
+        act.setChecked(on)
+        if not on:
+            return
+        s = self.media.session
+        menu.addAction("What is this?…", self.identify)
+        if s and s.track is not None:
+            menu.addAction("Subtitles 0.5 s earlier", lambda: self.media.nudge(-0.5))
+            menu.addAction("Subtitles 0.5 s later", lambda: self.media.nudge(0.5))
+            menu.addAction("Wrong subtitles: try others", self.media.wrong_subtitles)
+            menu.addAction("Make subtitles from the audio", self.media.generate_now)
+        sd = menu.addAction("Sound descriptions", self._toggle_sound_descriptions)
+        sd.setCheckable(True)
+        sd.setChecked(self.s.media.sound_descriptions)
+
+    def _toggle_sound_descriptions(self) -> None:
+        self.s.media.sound_descriptions = not self.s.media.sound_descriptions
+        self._queue_save()
+        if self.settings_window:
+            self.settings_window.refresh()
 
     def _on_state(self, state: str, detail: str) -> None:
         self.tray.set_state(state, detail)
-        self.overlay.set_status({
+        self._live_status = {
             "off": f"Live subtitles are off  ·  {self.s.hotkeys.toggle} to start",
             "loading": detail or "Starting…",
             "live": detail or "Listening",
             "error": f"Stopped: {detail}"[:90],
-        }.get(state, detail))
+        }.get(state, detail)
+        if self.media.session is None:
+            self.overlay.set_status(self._live_status)
         if state == "error":
             self.tray.notify("Live subtitles stopped", detail, error=True)
         if state == "live":
@@ -300,6 +416,11 @@ class App(QObject):
             self._update_model_status()
             if self.live.running:
                 self._restart_timer.start()
+            self.media.restart_capture()
+        elif section == "media":
+            if self.s.media.enabled != self.media.running:
+                self.set_media(self.s.media.enabled)
+            self.tray.set_flags(self.s.layout.visible, self.s.layout.locked, self.s.media.enabled)
         elif section == "hotkeys":
             self._register_hotkeys()
         self._queue_save()
@@ -335,6 +456,10 @@ class App(QObject):
             "toggle": (h.toggle, self.toggle_live),
             "lock": (h.lock, lambda: self.set_locked(not self.s.layout.locked)),
             "visibility": (h.visibility, lambda: self.set_visible(not self.s.layout.visible)),
+            "media": (h.media, lambda: self.set_media(not self.media.running)),
+            "earlier": (h.earlier, lambda: self.media.nudge(-0.5)),
+            "later": (h.later, lambda: self.media.nudge(0.5)),
+            "wrong": (h.wrong, self.media.wrong_subtitles),
         })
         if self.settings_window:
             self.settings_window.set_hotkey_failures(failed)
@@ -363,10 +488,11 @@ class App(QObject):
         if self.settings_window is None:
             from .settings_window import SettingsWindow
 
-            self.settings_window = SettingsWindow(self.s, list_output_devices)
+            self.settings_window = SettingsWindow(self.s, list_output_devices, lambda: self.media.store)
             self.settings_window.changed.connect(self._on_settings_changed)
             self.settings_window.snap_requested.connect(self.overlay.snap_to_default)
             self.settings_window.transcribe_requested.connect(self.pick_videos)
+            self.settings_window.identify_requested.connect(self.identify)
             self.settings_window.set_hotkey_failures(self.hotkeys.failed)
             self._update_model_status()
         self.settings_window.show()

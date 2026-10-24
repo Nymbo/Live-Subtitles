@@ -37,6 +37,8 @@ class Tray(QObject):
     visibility_toggled = Signal(bool)
     snap_requested = Signal()
     transcribe_requested = Signal()
+    media_toggled = Signal(bool)
+    identify_requested = Signal()
     jobs_requested = Signal()
     settings_requested = Signal()
     logs_requested = Signal()
@@ -54,6 +56,9 @@ class Tray(QObject):
         self.visible_action = self._check("Show subtitles", self.visibility_toggled.emit)
         self.lock_action = self._check("Lock overlay (click-through)", self.lock_toggled.emit)
         self.menu.addAction("Snap overlay to bottom centre", self.snap_requested.emit)
+        self.menu.addSeparator()
+        self.media_action = self._check("Media subtitles for movies and TV", self.media_toggled.emit)
+        self.menu.addAction("What is this?…", self.identify_requested.emit)
         self.menu.addSeparator()
         self.menu.addAction("Create subtitles for a video…", self.transcribe_requested.emit)
         self.jobs_action = self.menu.addAction("Subtitle jobs…", self.jobs_requested.emit)
@@ -86,8 +91,11 @@ class Tray(QObject):
         self.toggle_action.setText("Stop live subtitles" if state in ("live", "loading")
                                    else "Start live subtitles")
 
-    def set_flags(self, visible: bool, locked: bool) -> None:
-        for action, value in ((self.visible_action, visible), (self.lock_action, locked)):
+    def set_flags(self, visible: bool, locked: bool, media: bool | None = None) -> None:
+        pairs = [(self.visible_action, visible), (self.lock_action, locked)]
+        if media is not None:
+            pairs.append((self.media_action, media))
+        for action, value in pairs:
             action.blockSignals(True)
             action.setChecked(value)
             action.blockSignals(False)

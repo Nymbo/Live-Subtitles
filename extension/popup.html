@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { font: 13px "Segoe UI", system-ui, sans-serif; width: 280px; margin: 12px; color: #1f2328; }
+  h1 { font-size: 14px; margin: 0 0 8px; }
+  .state { padding: 8px; border-radius: 6px; background: #f2f4f7; margin-bottom: 10px; }
+  .off { color: #a33; }
+  label { display: flex; gap: 6px; align-items: center; color: #555; }
+  input { width: 80px; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #1e1f22; color: #e6e6e6; }
+    .state { background: #2b2d31; }
+    label { color: #aaa; }
+  }
+</style>
+</head>
+<body>
+  <h1>Live Subtitles</h1>
+  <div class="state" id="state">Checking the app…</div>
+  <label>App port <input id="port" type="number" min="1024" max="65535"></label>
+  <script src="popup.js"></script>
+</body>
+</html>

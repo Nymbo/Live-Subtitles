@@ -76,6 +76,10 @@ class Hotkeys:
     toggle: str = "Ctrl+Alt+S"          # Ctrl+Alt+C is often taken (it was on the dev machine)
     lock: str = "Ctrl+Alt+L"
     visibility: str = "Ctrl+Alt+H"
+    media: str = "Ctrl+Alt+V"           # media subtitles on / off (Ctrl+Alt+M was taken on the dev machine)
+    earlier: str = "Ctrl+Alt+["         # media subtitles 0.5 s earlier
+    later: str = "Ctrl+Alt+]"           # ... later
+    wrong: str = "Ctrl+Alt+W"           # these subtitles are wrong: try others
 
 
 @dataclass
@@ -88,12 +92,30 @@ class Files:
 
 
 @dataclass
+class Media:
+    """Media subtitles (live_subtitles/media). Keys are DPAPI-encrypted (media/secrets.py)."""
+    enabled: bool = True                # watch for known titles and show their subtitles
+    sound_descriptions: bool = True     # [door creaks], speaker labels, music marks
+    generated_sounds: bool = True       # add sound cues from the audio when a track has none
+    audio_language: str = "auto"        # auto: from TMDB's original language | en: always English audio
+    tmdb_key: str = ""
+    opensubtitles_key: str = ""
+    opensubtitles_user: str = ""
+    opensubtitles_password: str = ""
+    wyzie_key: str = ""
+    subdl_key: str = ""
+    extension: bool = True              # listen for the browser extension on 127.0.0.1
+    port: int = 47219
+
+
+@dataclass
 class Settings:
     appearance: Appearance = field(default_factory=Appearance)
     layout: Layout = field(default_factory=Layout)
     engine: Engine = field(default_factory=Engine)
     hotkeys: Hotkeys = field(default_factory=Hotkeys)
     files: Files = field(default_factory=Files)
+    media: Media = field(default_factory=Media)
     custom_presets: dict[str, dict] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -178,5 +200,5 @@ def matching_preset(appearance: Appearance, custom: dict[str, dict] | None = Non
     return None
 
 
-__all__ = ["Settings", "Appearance", "Layout", "Engine", "Hotkeys", "Files", "PRESETS",
+__all__ = ["Settings", "Appearance", "Layout", "Engine", "Hotkeys", "Files", "Media", "PRESETS",
            "load", "save", "preset_appearance", "appearance_overrides", "matching_preset", "replace"]

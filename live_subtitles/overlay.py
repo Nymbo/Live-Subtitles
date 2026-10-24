@@ -72,6 +72,8 @@ class CaptionOverlay(QWidget):
         self._drag: tuple[str, QPoint, QRect] | None = None
         self._hover = False
         self._hot_button: str | None = None
+        self.min_lines = 0                  # media subtitles may need more room than live captions
+        self.menu_extras = None             # callable(QMenu): media mode adds its actions
 
         self._fade = _anim(self, 180, self._on_fade)
         self._fade.finished.connect(self._fade_done)
@@ -133,6 +135,11 @@ class CaptionOverlay(QWidget):
                 self._scroll_anim.setEndValue(0.0)
                 self._scroll_anim.start()
         self.update()
+
+    def set_min_lines(self, n: int) -> None:
+        if n != self.min_lines:
+            self.min_lines = n
+            self._apply_geometry()
 
     def snap_to_default(self) -> None:
         self.layout_cfg.x = self.layout_cfg.y = None
@@ -203,7 +210,7 @@ class CaptionOverlay(QWidget):
     def _apply_geometry(self, initial: bool = False) -> None:
         lay = self.layout_cfg
         width = max(MIN_WIDTH, lay.width)
-        height = block_height(self.ap, lay.max_lines)
+        height = block_height(self.ap, max(lay.max_lines, self.min_lines))
         if lay.x is None or lay.y is None or not self._on_some_screen(lay.x, lay.y, width, height):
             screen = QGuiApplication.primaryScreen().availableGeometry()
             x = screen.center().x() - width // 2
@@ -389,6 +396,9 @@ class CaptionOverlay(QWidget):
         menu.addAction("Lock in place (click-through)", lambda: self.lock_requested.emit(True))
         menu.addAction("Snap to bottom centre", self.snap_to_default)
         menu.addAction("Hide subtitles", self.hide_requested.emit)
+        if self.menu_extras:
+            menu.addSeparator()
+            self.menu_extras(menu)
         menu.addSeparator()
         menu.addAction("Settings…", self.settings_requested.emit)
         menu.exec(QCursor.pos())
