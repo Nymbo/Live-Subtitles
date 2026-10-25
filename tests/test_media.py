@@ -257,6 +257,27 @@ class AlignTests(unittest.TestCase):
         c._check_on_track(s, [(w, t, t + 0.3) for w, t in _heard(self.cues, 1.0, 0.0, 120, 125)])
         self.assertFalse(s.off_track)
 
+    def test_notice_explains_live_captions(self):
+        import tempfile
+        from pathlib import Path
+
+        from live_subtitles.media.controller import MediaController, Session
+        from live_subtitles.media.store import Store, StoredTrack
+        from live_subtitles.settings import Settings
+
+        c = MediaController(Settings(), Store(Path(tempfile.mkdtemp()) / "m.db"))
+        self.assertEqual(c.notice(), "")
+        s = c.session = Session(1, "t")
+        s.state = "searching"
+        self.assertIn("getting subtitles", c.notice())
+        s.track, s.state = StoredTrack("k", "k", {}, "x", self.cues), "aligning"
+        self.assertIn("Subtitles found", c.notice())     # live captions bridge until the lock
+        s.aligner.segments.append(align.Segment(0.0, 1.0, 0.0))
+        s.state = "synced"
+        self.assertEqual(c.notice(), "")                 # the subtitles themselves show
+        s.off_track = True
+        self.assertIn("finding the place", c.notice())
+
     def test_match_score_tells_tracks_apart(self):
         heard = _heard(self.cues, 1.0, 0.0, 50, 250)
         other = align.TrackIndex(_script(seed=99))

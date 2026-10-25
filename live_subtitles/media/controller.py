@@ -826,6 +826,23 @@ class MediaController(QObject):
         s = self.session
         return bool(s and s.track is not None and s.state in ("aligning", "synced", "generating"))
 
+    def notice(self) -> str:
+        """While live captions stand in for the subtitles, why: "" when subtitles show."""
+        s = self.session
+        if s is None or self.lines_now() is not None:
+            return ""
+        if s.state == "identifying":
+            return "Live captions for now · finding out what's playing"
+        if s.state == "searching":
+            return "Live captions for now · getting subtitles, a few seconds"
+        if s.state == "aligning":
+            return "Subtitles found · syncing them to the audio, live captions until then"
+        if s.state == "synced" and s.off_track:
+            return "Live captions for a moment · finding the place in the subtitles"
+        if s.state == "generating" and s.generating == "asr":
+            return "Live captions for now · making subtitles from the audio"
+        return ""
+
     def position(self, s: Session) -> float:
         if s.domain == "media" and self.ext.fresh():
             return self.ext.now()

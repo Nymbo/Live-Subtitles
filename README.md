@@ -92,7 +92,10 @@ TV*, or Ctrl+Alt+V):
 3. **Sync.** The track is checked against what the speakers play. English audio: the
    media worker recognises five-second stretches (Parakeet TDT, int8 on the CPU) and
    matches rare three-word runs against the track's lines. Until that locks, the overlay
-   keeps showing live captions, so there is never a gap. Other languages (Korean,
+   keeps showing live captions, so there is never a gap, with a small note above them
+   ("Subtitles found · syncing them to the audio…") so it's clear the subtitles are
+   coming. The same note shows while subtitles are being fetched, and while the overlay
+   is back on live captions for a stretch the track doesn't have. Other languages (Korean,
    Japanese, ...) with English subtitles: voice activity is cross-correlated with the
    track's cue spans instead, which takes a couple of minutes of speech; until then the
    overlay says "Syncing subtitles…" rather than guess.

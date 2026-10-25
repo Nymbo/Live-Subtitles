@@ -2,8 +2,8 @@ const DEFAULT_PORT = 47219;
 const STATES = {
   watching: "Waiting for a movie or episode to play.",
   identifying: "Finding out what's playing…",
-  searching: "Finding subtitles…",
-  aligning: "Syncing subtitles…",
+  searching: "Getting subtitles. Live captions show for these few seconds.",
+  aligning: "Subtitles found, syncing them to the audio. Live captions show until then.",
   synced: "Synced.",
   generating: "Making subtitles from the audio.",
   unknown: "Not sure what's playing. Right-click the subtitles → What is this?",

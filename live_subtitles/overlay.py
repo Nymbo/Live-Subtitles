@@ -11,6 +11,9 @@ click-through, so it never steals clicks from the video underneath, and never sh
 the hover chrome (unlock from the tray or with the hotkey).
 
 When a line rolls off the top, the block slides up instead of jumping.
+
+A note (media mode: live captions only until the subtitles are found and synced) sits
+in a small strip above the subtitles, hover or not.
 """
 
 from __future__ import annotations
@@ -36,6 +39,7 @@ BUTTONS = (("lock", "", "Lock in place (click-through)"),
 CHROME_IN_MS, CHROME_OUT_MS = 120, 90
 SCROLL_MS = 220
 FADE_IN_MS = 110
+NOTE_H = 26          # the note strip above the subtitles
 
 
 def _anim(parent, duration: int, on_value) -> QVariantAnimation:
@@ -73,6 +77,7 @@ class CaptionOverlay(QWidget):
         self._hover = False
         self._hot_button: str | None = None
         self.min_lines = 0                  # media subtitles may need more room than live captions
+        self.note = ""                      # media mode's "live captions until synced" note
         self.menu_extras = None             # callable(QMenu): media mode adds its actions
 
         self._fade = _anim(self, 180, self._on_fade)
@@ -140,6 +145,14 @@ class CaptionOverlay(QWidget):
         if n != self.min_lines:
             self.min_lines = n
             self._apply_geometry()
+
+    def set_note(self, text: str) -> None:
+        if text != self.note:
+            grow = bool(text) != bool(self.note)
+            self.note = text
+            if grow:
+                self._apply_geometry()
+            self.update()
 
     def snap_to_default(self) -> None:
         self.layout_cfg.x = self.layout_cfg.y = None
@@ -210,7 +223,7 @@ class CaptionOverlay(QWidget):
     def _apply_geometry(self, initial: bool = False) -> None:
         lay = self.layout_cfg
         width = max(MIN_WIDTH, lay.width)
-        height = block_height(self.ap, max(lay.max_lines, self.min_lines))
+        height = block_height(self.ap, max(lay.max_lines, self.min_lines)) + (NOTE_H if self.note else 0)
         if lay.x is None or lay.y is None or not self._on_some_screen(lay.x, lay.y, width, height):
             screen = QGuiApplication.primaryScreen().availableGeometry()
             x = screen.center().x() - width // 2
@@ -265,7 +278,28 @@ class CaptionOverlay(QWidget):
             paint_captions(p, rect, self.lines, self.ap, self._opacity, self._scroll, self._outgoing)
         elif self._chrome > 0:
             self._paint_placeholder(p, rect)
+        if self.note:
+            self._paint_note(p, rect)
         p.end()
+
+    def _paint_note(self, p: QPainter, rect: QRectF) -> None:
+        """A small dark pill, top centre, clear of the hover toolbar."""
+        font = QFont("Segoe UI")
+        font.setPixelSize(max(12, min(16, int(self.ap.font_size * 0.34))))
+        p.save()
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setFont(font)
+        fm = p.fontMetrics()
+        room = rect.width() - 2 * (len(BUTTONS) * (BUTTON + 4) + 12)
+        text = fm.elidedText(self.note, Qt.TextElideMode.ElideRight, int(max(80, room)))
+        w = fm.horizontalAdvance(text) + 20
+        pill = QRectF(rect.center().x() - w / 2, 4, w, NOTE_H - 6)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(12, 12, 16, 175))
+        p.drawRoundedRect(pill, pill.height() / 2, pill.height() / 2)
+        p.setPen(QColor(235, 235, 235))
+        p.drawText(pill, int(Qt.AlignmentFlag.AlignCenter), text)
+        p.restore()
 
     def _paint_placeholder(self, p: QPainter, rect: QRectF) -> None:
         """The status in the caption style, with a small usage hint under it (room permitting)."""

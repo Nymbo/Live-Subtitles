@@ -285,6 +285,7 @@ class App(QObject):
             self.overlay.set_min_lines(3)
             lines = self._wrap(lines)
         self.overlay.set_lines(lines)
+        self.overlay.set_note(self.media.notice() if self.media.running else "")
 
     def _on_media_tick(self) -> None:
         if self.media.active():
@@ -325,6 +326,7 @@ class App(QObject):
                 self._show_lines()
         else:
             self.overlay.set_status(text[:110])
+        self._show_lines()
         logger.info("Media %s %s", state, text)
 
     def _on_bridge(self, want: bool) -> None:
