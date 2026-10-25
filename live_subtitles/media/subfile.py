@@ -192,5 +192,18 @@ def has_sound_descriptions(cues: list[Cue]) -> bool:
     return n >= max(5, len(cues) * 0.03)
 
 
+ENGLISH_WORDS = frozenset(
+    "the you i to a and it is that of what in me this be have no not we my your do don't it's i'm for "
+    "on are was he she they with just know all so can get there here what's come right like".split())
+
+
+def looks_english(cues: list[Cue], sample: int = 200) -> bool:
+    """Is the text English? A quarter of everyday words are among the commonest few dozen."""
+    words = [w for c in cues[:sample] for line in c.lines for w in re.findall(r"[a-z']+", line.lower())]
+    if len(words) < 30:
+        return False
+    return sum(w in ENGLISH_WORDS for w in words) / len(words) >= 0.2
+
+
 def track_duration(cues: list[Cue]) -> float:
     return max((c.end for c in cues), default=0.0)

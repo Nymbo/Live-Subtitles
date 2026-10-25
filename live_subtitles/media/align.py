@@ -34,7 +34,8 @@ NGRAM = 3
 MAX_POSITIONS = 6           # an n-gram found in more places than this says nothing
 BANDWIDTH_S = 0.45          # anchors this close in offset agree
 WINDOW_S = 900.0            # anchors older than this (audio time) no longer steer the fit
-JUMP_LOOKBACK_S = 60.0      # fresh anchors that may announce a jump
+JUMP_LOOKBACK_S = 20.0      # fresh anchors that may announce a jump (older ones still agree
+                            # with the old timing and would hold a real jump back for a minute)
 MIN_LOCK_WEIGHT = 2.5       # summed anchor weight needed to lock
 MIN_LOCK_ANCHORS = 3
 MIN_JUMP_S = 1.2            # an offset change smaller than this is drift, not a jump

@@ -12,14 +12,43 @@ so an answer to "What is this?" can be remembered for that page, not just that e
 
 from __future__ import annotations
 
+import json
+import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 APP_SUFFIXES = re.compile(
-    r"\s*(?:[-–—|]\s*)?(?:(?:and \d+ more pages?|Personal|Work|Profile \d+|InPrivate)\s*[-–—]\s*)*"
+    r"\s*(?:[-–—|]\s*)?"
     r"(?:Google Chrome|Chromium|Mozilla Firefox|Firefox|Microsoft\s*Edge|Brave|Opera|Vivaldi|Arc|"
     r"VLC media player|MPC-HC|MPC-BE|mpv|PotPlayer|Media Player Classic|Movies & TV|Media Player)\s*$",
     re.I)
+# Edge and Chrome put the profile between the page and the browser ("... - Nymbo - Microsoft
+# Edge"), and "and 2 more pages" after the page when a window has several tabs.
+PROFILE_SEGMENT = re.compile(r"\s*[-–—]\s*([^-–—]{1,40})$")
+MORE_PAGES = re.compile(r"\s+and \d+ more pages?$", re.I)
+STOCK_PROFILES = {"personal", "work", "guest", "inprivate", "default", "person 1", "your chrome"}
+PROFILE_ROOTS = ("Microsoft/Edge/User Data", "Google/Chrome/User Data", "BraveSoftware/Brave-Browser/User Data",
+                 "Vivaldi/User Data")
+_profiles: set[str] | None = None
+
+
+def browser_profiles() -> set[str]:
+    """Profile names of the Chromium browsers on this machine (lower case), read once."""
+    global _profiles
+    if _profiles is None:
+        names = set(STOCK_PROFILES)
+        local = os.environ.get("LOCALAPPDATA")
+        for root in PROFILE_ROOTS if local else ():
+            try:
+                state = json.loads((Path(local) / root / "Local State").read_text(encoding="utf-8"))
+                for info in state.get("profile", {}).get("info_cache", {}).values():
+                    if info.get("name"):
+                        names.add(info["name"].strip().lower())
+            except (OSError, ValueError, AttributeError):
+                continue
+        _profiles = names
+    return _profiles
 ZERO_WIDTH = re.compile(r"[​-‏⁠﻿]")
 SEPARATORS = re.compile(r"\s+[-–—|:•·]+\s+|\s*\|\s*|\s+::\s+")
 RELEASE_NOISE = re.compile(
@@ -46,7 +75,7 @@ PREFIX = re.compile(r"^(?:watch(?:ing)?|stream|download|now playing)\s*[:\-]?\s+
 SUFFIX = re.compile(
     r"\s+(?:(?:full\s+)?(?:movie|film|series|tv\s+show|episode)s?|online|free|for\s+free|in\s+hd|hd|"
     r"full\s*hd|streaming|stream|eng\s*sub|english\s+sub(?:bed|title[sd]?)?|sub(?:bed)?|dub(?:bed)?|"
-    r"with\s+english\s+subtitles|on\s+\w+)\s*$", re.I)
+    r"with\s+english\s+subtitles|on\s+\w+|superfan|extended(?:\s+(?:cut|edition))?)\s*$", re.I)
 EPISODE_PATTERNS = (
     re.compile(r"\bS(\d{1,2})\s*[.\-_ ]?\s*E(\d{1,3})\b", re.I),
     re.compile(r"\b(\d{1,2})x(\d{2,3})\b"),
@@ -55,6 +84,7 @@ EPISODE_PATTERNS = (
 )
 EPISODE_ONLY = re.compile(r"\b(?:Episode|Ep\.?)\s*(\d{1,4})\b", re.I)
 SEASON_ONLY = re.compile(r"\bSeason\s*(\d{1,2})\b", re.I)
+EDITION = re.compile(r"\b(?:superfan|extended)\b", re.I)
 YEAR = re.compile(r"[\(\[]?\b(19[2-9]\d|20[0-4]\d)\b[\)\]]?")
 
 
@@ -64,6 +94,7 @@ class Query:
     year: int | None = None
     season: int | None = None
     episode: int | None = None
+    edition: str = ""           # "extended" for extended cuts (Peacock's Superfan episodes)
 
     @property
     def is_episode(self) -> bool:
@@ -78,12 +109,20 @@ class Query:
         return s
 
 
+def _is_profile(name: str) -> bool:
+    n = name.strip().lower()
+    return n in browser_profiles() or bool(re.fullmatch(r"profile \d+", n))
+
+
 def strip_app(title: str) -> str:
     t = ZERO_WIDTH.sub("", title).strip()
-    prev = None
-    while prev != t:            # Edge: "... - Personal - Microsoft Edge"
-        prev = t
-        t = APP_SUFFIXES.sub("", t).strip()
+    stripped = APP_SUFFIXES.sub("", t).strip()
+    if stripped != t:
+        t = stripped
+        # Edge: "Page and 1 more page - Nymbo - Microsoft Edge"
+        while (m := PROFILE_SEGMENT.search(t)) and _is_profile(m.group(1)):
+            t = t[:m.start()].strip()
+        t = MORE_PAGES.sub("", t).strip()
     return t
 
 
@@ -155,7 +194,7 @@ def parse(window_title: str) -> Query | None:
     title = _clean_title(seg)
     if not title or title.lower() in GENERIC or _is_site(title) or len(title) < 2:
         return None
-    return Query(title, year, season, episode)
+    return Query(title, year, season, episode, "extended" if EDITION.search(t) else "")
 
 
 def looks_like_media(window_title: str, from_player: bool = False) -> bool:

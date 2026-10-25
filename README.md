@@ -124,6 +124,17 @@ Load unpacked). It reports the page's video position, pause and seeks to the app
 timing is exact from the first second and survives seeks instantly, and tracks can be
 generated ahead of playback. Without it everything else still works from the audio alone.
 
+When the page's player loads its own subtitle files (including ones fetched through a
+proxy that hides the file name in a base64 path), the English one is used first: it was
+made for that stream, so it is in time from the start and costs no download. With videos
+playing in several tabs, the app follows the one with sound that was started last.
+
+It also reads the episode off the player ("S2 E3", "Season 2, Episode 3") on sites such as
+Peacock and Netflix, whose page title names the show but never the episode. Without the
+extension those sites ask once per episode (right-click → *What is this?*, which offers the
+episode after the last one picked). Extended cuts (Peacock's Superfan episodes) prefer an
+EXTENDED subtitle track.
+
 Generating a track from a file (or a stream URL) without the app:
 
 ```powershell

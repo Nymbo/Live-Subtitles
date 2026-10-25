@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
@@ -83,7 +84,8 @@ class OpenSubtitles(Source):
         return bool(self.key)
 
     def _headers(self, auth: bool = False) -> dict:
-        h = {"Api-Key": self.key}
+        # /download answers 503 to the default "application/json, */*"; it wants JSON only.
+        h = {"Api-Key": self.key, "Accept": "application/json"}
         if auth and self._token:
             h["Authorization"] = f"Bearer {self._token}"
         return h
@@ -197,7 +199,11 @@ class SubDL(Source):
         return out
 
     def download(self, c: Candidate) -> bytes:
-        return net.request(c.ref["url"])
+        # SubDL now counts downloads per key; the panel says to pass it to download links.
+        return net.request(c.ref["url"], headers={"x-api-key": self.key})
+
+
+COUNTRY_TAG = re.compile(r"\s*\((?:US|UK|AU|CA|NZ|IE|\d{4})\)\s*$")
 
 
 class Gestdown(Source):
@@ -213,7 +219,13 @@ class Gestdown(Source):
 
         show = next((s for s in shows if m.tmdb_id and s.get("tmdbId") == m.tmdb_id), None)
         if show is None and not m.tmdb_id:
-            show = next((s for s in shows if normalize_name(s.get("name", "")) == normalize_name(m.title)), None)
+            # Addic7ed tags remakes by country ("The Office (US)"). Without a TMDB id to tell
+            # them apart, an exact name wins, then the US version, then the first.
+            want = normalize_name(m.title)
+            same = [s for s in shows if normalize_name(COUNTRY_TAG.sub("", s.get("name", ""))) == want]
+            show = next((s for s in same if normalize_name(s.get("name", "")) == want), None) \
+                or next((s for s in same if s.get("name", "").endswith("(US)")), None) \
+                or (same[0] if same else None)
         if show is None:
             return []
         try:
@@ -235,10 +247,44 @@ class Gestdown(Source):
         return net.request(c.ref["url"])
 
 
-SOURCE_PRIOR = {"opensubtitles": 0.6, "gestdown": 0.7, "subdl": 0.4, "wyzie": 0.3}
+class PageSubtitles(Source):
+    """Subtitle files the page's own player loaded, as the extension saw them requested.
+    They were made for this exact stream, so they come first; only English ones are kept
+    (the controller checks the text once downloaded)."""
+    name = "page"
+    NOT_ENGLISH = re.compile(
+        r"(?<![a-z])(?:ar|ara|arabic|es|spa|spanish|fr|fre|fra|french|de|ger|deu|german|it|ita|italian|pt|por|"
+        r"portuguese|ru|rus|russian|tr|tur|turkish|zh|chi|zho|chinese|ja|jpn|japanese|ko|kor|korean|hi|hin|"
+        r"hindi|id|ind|indonesian|vi|vie|vietnamese|th|tha|thai|pl|pol|polish|nl|dut|nld|dutch|fa|per|"
+        r"persian|he|heb|hebrew|ur|urd|urdu)(?![a-z])", re.I)
+
+    MAX_TRIES = 12              # a player may list every language under names that don't say which
+
+    def __init__(self, subs: list[dict], referer: str = ""):
+        self.subs, self.referer = subs, referer
+
+    def search(self, m: Match) -> list[Candidate]:
+        out = []
+        for sub in self.subs:
+            url = sub["url"]
+            name = sub.get("name") or urllib.parse.unquote(urllib.parse.urlsplit(url).path.rsplit("/", 1)[-1])
+            if self.NOT_ENGLISH.search(name.rsplit(".", 1)[0]):
+                continue
+            out.append(Candidate(self.name, url, f"the player's own subtitles ({name[:50]})", ref={"url": url}))
+        return out[:self.MAX_TRIES]
+
+    def download(self, c: Candidate) -> bytes:
+        return net.request(c.ref["url"], headers={"Referer": self.referer} if self.referer else None)
 
 
-def score(c: Candidate, sound_descriptions: bool) -> float:
+SOURCE_PRIOR = {"page": 12.0, "opensubtitles": 0.6, "gestdown": 0.7, "subdl": 0.4, "wyzie": 0.3}
+
+
+SEASON_PACK = re.compile(r"all episodes|complete|\bs\d{1,2}\b(?!\s*e\d)|season\s*\d+\s*(?:pack|full)", re.I)
+EPISODE_TAG = re.compile(r"s\d{1,2}\s*e\d{1,3}|\d{1,2}x\d{2}", re.I)
+
+
+def score(c: Candidate, sound_descriptions: bool, edition: str = "") -> float:
     s = SOURCE_PRIOR.get(c.source, 0.0) + math.log10(1 + c.downloads)
     if c.trusted:
         s += 0.8
@@ -252,6 +298,10 @@ def score(c: Candidate, sound_descriptions: bool) -> float:
         s -= 6.0            # forced tracks only cover foreign-language bits
     if any(w in rel for w in ("commentary",)):
         s -= 6.0
+    if SEASON_PACK.search(rel) and not EPISODE_TAG.search(rel):
+        s -= 4.0            # a whole season in one file or zip: not this episode
+    if edition and edition in rel:
+        s += 2.5            # the extended cut's own track has the extra scenes
     return s
 
 
@@ -272,7 +322,7 @@ def search_all(sources: list[Source], m: Match, sound_descriptions: bool) -> lis
             results += found
     seen, out = set(), []
     for c in results:
-        c.score = score(c, sound_descriptions)
+        c.score = score(c, sound_descriptions, m.edition)
         if c.uid in seen:
             continue
         seen.add(c.uid)

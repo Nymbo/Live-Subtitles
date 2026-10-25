@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from dataclasses import asdict
 
-from PySide6.QtCore import QRectF, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QKeySequence, QLinearGradient, QPainter, QPainterPath
 from PySide6.QtWidgets import (
-    QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFontComboBox, QFormLayout, QGroupBox,
+    QAbstractScrollArea, QApplication, QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFontComboBox, QFormLayout, QGroupBox,
     QHBoxLayout, QInputDialog, QKeySequenceEdit, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QMessageBox, QPushButton, QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
@@ -21,6 +21,30 @@ from .settings import (PRESETS, Appearance, Settings, appearance_overrides, matc
 
 SAMPLE = ("The storm is getting closer, we should head back before it gets dark. "
           "Wait. Did you hear that? Something is moving out there.")
+
+
+class _WheelGuard(QObject):
+    """Scrolling a page must not change the spin box or list the pointer passes over (it
+    once moved the extension port by four). The wheel only acts on a focused field."""
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() == QEvent.Type.Wheel and not obj.hasFocus():
+            # Hand it to the page's scroll bar instead, so the page still scrolls.
+            area = obj.parentWidget()
+            while area is not None and not isinstance(area, QAbstractScrollArea):
+                area = area.parentWidget()
+            if area is not None:
+                QApplication.sendEvent(area.verticalScrollBar(), event)
+            return True
+        return False
+
+
+_WHEEL_GUARD = _WheelGuard()
+
+
+def _guard_wheel(w: QWidget) -> None:
+    w.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+    w.installEventFilter(_WHEEL_GUARD)
 
 
 class ColorButton(QPushButton):
@@ -175,6 +199,7 @@ class SettingsWindow(QWidget):
         if suffix:
             w.setSuffix(suffix)
         w.setKeyboardTracking(False)
+        _guard_wheel(w)
         return w
 
     @staticmethod
@@ -182,6 +207,7 @@ class SettingsWindow(QWidget):
         w = QComboBox()
         for label, data in items:
             w.addItem(label, data)
+        _guard_wheel(w)
         return w
 
     def _toggle_bright(self, on: bool) -> None:

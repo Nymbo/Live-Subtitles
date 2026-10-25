@@ -32,14 +32,16 @@ class Match:
     original_language: str = "en"     # "" when unknown (identified without TMDB)
     runtime_s: float = 0.0      # 0 when unknown
     confidence: float = 0.0     # 0-1, how sure the title match is
+    edition: str = ""           # "extended" for an extended cut: its subtitles run longer
 
     @property
     def key(self) -> str:
         """Cache key for the title."""
         base = f"tmdb{self.tmdb_id}" if self.tmdb_id else (self.show_imdb_id or self.imdb_id)
+        cut = f":{self.edition}" if self.edition else ""
         if self.kind == "episode":
-            return f"tv:{base}:s{self.season or 0}e{self.episode or 0}"
-        return f"movie:{base}"
+            return f"tv:{base}:s{self.season or 0}e{self.episode or 0}{cut}"
+        return f"movie:{base}{cut}"
 
     def label(self) -> str:
         if self.kind == "episode":
@@ -172,18 +174,22 @@ class Tmdb:
 IMDB_SUGGEST = "https://v3.sg.media-imdb.com/suggestion/x/{}.json"
 
 
-def identify_keyless(q: Query) -> Match | None:
-    """Without a TMDB key: IMDb's public title suggestions. No runtime or original language,
-    so media mode starts by assuming English audio and switches if nothing it hears matches."""
+SHOW_KINDS = ("tvSeries", "tvMiniSeries")
+MOVIE_KINDS = ("movie", "tvMovie", "video", "short", "tvSpecial", "tvShort")
+
+
+def _suggest(text: str) -> list[dict]:
     import urllib.parse
 
-    data = net.get_json(IMDB_SUGGEST.format(urllib.parse.quote(q.title.lower()[:60])))
+    data = net.get_json(IMDB_SUGGEST.format(urllib.parse.quote(text.lower()[:60])))
+    return [d for d in (data or {}).get("d", [])[:10] if str(d.get("id", "")).startswith("tt")]
+
+
+def _best_suggestion(q: Query, kinds: tuple[str, ...]) -> tuple[dict, float] | None:
     want = normalize_name(q.title)
-    kinds = ("tvSeries", "tvMiniSeries") if q.is_episode else ("movie", "tvMovie", "video", "short", "tvSpecial",
-                                                                 "tvShort")
     best, best_score = None, 0.0
-    for i, d in enumerate((data or {}).get("d", [])[:10]):
-        if not str(d.get("id", "")).startswith("tt") or d.get("qid") not in kinds:
+    for i, d in enumerate(_suggest(q.title)):
+        if d.get("qid") not in kinds:
             continue
         score = difflib.SequenceMatcher(None, want, normalize_name(d.get("l", ""))).ratio() - i * 0.02
         if q.year and d.get("y"):
@@ -192,8 +198,43 @@ def identify_keyless(q: Query) -> Match | None:
             best, best_score = d, score
     if best is None or best_score < 0.7:
         return None
+    return best, min(1.0, best_score) * 0.9
+
+
+def identify_keyless(q: Query) -> Match | None:
+    """Without a TMDB key: IMDb's public title suggestions. No runtime or original language,
+    so media mode starts by assuming English audio and switches if nothing it hears matches."""
+    found = _best_suggestion(q, SHOW_KINDS if q.is_episode else MOVIE_KINDS)
+    if found is None:
+        return None
+    best, conf = found
     if q.is_episode:
         return Match("episode", 0, best["l"], best.get("y"), q.season or 1, q.episode or 1,
-                     show_imdb_id=best["id"], original_language="", confidence=min(1.0, best_score) * 0.9)
+                     show_imdb_id=best["id"], original_language="", confidence=conf)
     return Match("movie", 0, best["l"], best.get("y"), imdb_id=best["id"], original_language="",
-                 confidence=min(1.0, best_score) * 0.9)
+                 confidence=conf)
+
+
+def show_keyless(q: Query) -> str:
+    """The show's name when a title with no episode in it names a TV show, else ""."""
+    found = _best_suggestion(q, SHOW_KINDS)
+    return found[0]["l"] if found else ""
+
+
+def search_keyless(text: str) -> list[dict]:
+    """The "What is this?" search without a TMDB key, shaped like `Tmdb.search`."""
+    out = []
+    for d in _suggest(text):
+        kind = "tv" if d.get("qid") in SHOW_KINDS else "movie" if d.get("qid") in MOVIE_KINDS else ""
+        if kind:
+            out.append({"kind": kind, "tmdb_id": 0, "imdb_id": d["id"], "title": d.get("l", ""),
+                        "year": d.get("y") or "", "overview": d.get("s", "")})
+    return out
+
+
+def lookup_keyless(r: dict, season: int, episode: int) -> Match:
+    year = r["year"] if isinstance(r.get("year"), int) else None
+    if r["kind"] == "tv":
+        return Match("episode", 0, r["title"], year, season, episode, show_imdb_id=r["imdb_id"],
+                     original_language="", confidence=1.0)
+    return Match("movie", 0, r["title"], year, imdb_id=r["imdb_id"], original_language="", confidence=1.0)

@@ -345,7 +345,7 @@ class App(QObject):
 
         s = self.media.session
         title = (s.window_title if s else "") or self.media.last_title
-        dlg = IdentifyDialog(self.s.media, title)
+        dlg = IdentifyDialog(self.s.media, title, last=self.media.last_answer(title))
         dlg.chosen.connect(self.media.identify_manually)
         self._dialog = dlg
         dlg.show()

@@ -107,6 +107,8 @@ def translate(models: Models, audio: np.ndarray, t0: float, language: str) -> li
     out = []
     model = models.whisper()
     lang = (language or "").split("-")[0].lower() or None
+    if lang == "auto":          # the title's language isn't known: Whisper detects it
+        lang = None
     for a, b in speech_spans(models, audio, t0, max_s=18.0):
         if b - a < 0.6:
             continue

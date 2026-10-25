@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QFormLayout, QHBoxLayo
 
 from . import titles
 from .secrets import unprotect
-from .tmdb import Match, Tmdb
+from .tmdb import Match, Tmdb, lookup_keyless, search_keyless
 
 logger = logging.getLogger(__name__)
 
@@ -23,10 +23,12 @@ class _Relay(QObject):
 
 
 class IdentifyDialog(QDialog):
-    """Search TMDB, pick the movie or show (and episode), and remember it for this page."""
+    """Search TMDB (IMDb without a TMDB key), pick the movie or show (and episode), and
+    remember it for this page. `last` is the episode picked last time on a page like this,
+    so the next one is offered."""
     chosen = Signal(str, object)            # window title, Match
 
-    def __init__(self, media_settings, window_title: str, parent=None):
+    def __init__(self, media_settings, window_title: str, parent=None, last: Match | None = None):
         super().__init__(parent, Qt.WindowType.Window)
         self.setWindowTitle("What is this?")
         self.resize(560, 460)
@@ -41,7 +43,8 @@ class IdentifyDialog(QDialog):
         col.addWidget(QLabel(f"Playing: <b>{titles.strip_app(window_title) or '(no title)'}</b>"))
         row = QHBoxLayout()
         q = titles.parse(window_title)
-        self.query = QLineEdit(q.title if q else titles.strip_app(window_title))
+        text = last.title if last else (q.title if q else titles.strip_app(window_title))
+        self.query = QLineEdit(text)
         self.query.returnPressed.connect(self._search)
         go = QPushButton("Search")
         go.clicked.connect(self._search)
@@ -56,8 +59,15 @@ class IdentifyDialog(QDialog):
         self.season, self.episode = QSpinBox(), QSpinBox()
         self.season.setRange(0, 99)
         self.episode.setRange(1, 9999)
-        self.season.setValue(q.season if q and q.season is not None else 1)
-        self.episode.setValue(q.episode if q and q.episode else 1)
+        if q and q.is_episode:
+            self.season.setValue(q.season if q.season is not None else 1)
+            self.episode.setValue(q.episode)
+        elif last and last.kind == "episode":
+            self.season.setValue(last.season or 1)
+            self.episode.setValue((last.episode or 0) + 1)
+        else:
+            self.season.setValue(1)
+            self.episode.setValue(1)
         ep = QHBoxLayout()
         ep.addWidget(QLabel("Season"))
         ep.addWidget(self.season)
@@ -66,7 +76,8 @@ class IdentifyDialog(QDialog):
         ep.addStretch()
         form.addRow(ep)
         col.addLayout(form)
-        self.note = QLabel("The answer is remembered for this site, so it is only asked once.")
+        self.note = QLabel("Remembered for this site. Where the page never says which episode, "
+                           "the next one is suggested here.")
         self.note.setWordWrap(True)
         col.addWidget(self.note)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
@@ -74,20 +85,17 @@ class IdentifyDialog(QDialog):
         buttons.rejected.connect(self.reject)
         col.addWidget(buttons)
         self._sync_episode()
-        if self.tmdb.key:
-            self._search()
-        else:
-            self.note.setText("Add a TMDB key in Settings → Media first.")
+        self._search()
 
     def _search(self) -> None:
         text = self.query.text().strip()
-        if not text or not self.tmdb.key:
+        if not text:
             return
         self.note.setText("Searching…")
 
         def run():
             try:
-                self.relay.results.emit(self.tmdb.search(text))
+                self.relay.results.emit(self.tmdb.search(text) if self.tmdb.key else search_keyless(text))
             except Exception as exc:
                 self.relay.failed.emit(f"Search failed: {exc}")
 
@@ -121,6 +129,9 @@ class IdentifyDialog(QDialog):
 
         def run():
             try:
+                if not r.get("tmdb_id"):
+                    self.relay.picked.emit(lookup_keyless(r, season, episode))
+                    return
                 kind = "movie" if r["kind"] == "movie" else "episode"
                 self.relay.picked.emit(self.tmdb.lookup(kind, r["tmdb_id"], season, episode))
             except Exception as exc:

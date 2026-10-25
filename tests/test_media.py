@@ -92,6 +92,22 @@ class TitleTests(unittest.TestCase):
         self.assertTrue(looks_like_media("Dune: Part Two (2024) - HD Movie | 123Movies - Google Chrome"))
         self.assertTrue(looks_like_media("Parasite.2019.mkv - VLC media player", from_player=True))
 
+    def test_edge_profile_and_more_pages(self):
+        from live_subtitles.media import titles
+
+        saved = titles._profiles
+        titles._profiles = set(titles.STOCK_PROFILES) | {"nymbo"}
+        try:
+            t = "The Office: Superfan Episodes - Peacock and 1 more page - Nymbo - Microsoft​ Edge"
+            self.assertEqual(titles.strip_app(t), "The Office: Superfan Episodes - Peacock")
+            self.assertEqual(parse(t), Query("The Office", edition="extended"))
+            self.assertTrue(titles.looks_like_media(t))
+            self.assertEqual(parse("Inception (2010) - Profile 2 - Microsoft Edge"), Query("Inception", 2010))
+            # A last segment that isn't a profile stays: it may be the title itself.
+            self.assertEqual(titles.strip_app("Watch - The Bear - Microsoft Edge"), "Watch - The Bear")
+        finally:
+            titles._profiles = saved
+
     def test_site_key_ignores_episode(self):
         self.assertEqual(site_key("Show S01E02 - Site - Google Chrome"), site_key("Show S01E03 - Site - Google Chrome"))
 
@@ -196,6 +212,51 @@ class AlignTests(unittest.TestCase):
         self.assertIn("jumped", [last, "jumped" if len(a.segments) > 1 else None])
         self.assertAlmostEqual(a.current.offset, 100.0, delta=0.3)
 
+    def test_extended_cut_scene_is_caught_quickly(self):
+        # A broadcast track played against an extended cut: a 20 s scene the track doesn't
+        # have, after which everything is 20 s later than the track says. The old 60 s
+        # lookback took a minute of dialogue to accept that.
+        a = align.Aligner()
+        for lo in range(10, 200, 5):
+            a.add(self.index.anchors(_heard(self.cues, 1.0, 0.0, lo, lo + 5, seed=lo)))
+        self.assertAlmostEqual(a.current.offset, 0.0, delta=0.3)
+        caught = None
+        for lo in range(200, 300, 5):          # track time; heard 20 s later
+            if a.add(self.index.anchors(_heard(self.cues, 1.0, -20.0, lo, lo + 5, seed=lo))) == "jumped":
+                caught = lo + 5 - 200
+                break
+        self.assertIsNotNone(caught)
+        self.assertLessEqual(caught, 15)        # seconds of dialogue after the scene
+        self.assertAlmostEqual(a.current.offset, -20.0, delta=0.3)
+
+    def test_off_track_shows_live_captions(self):
+        import tempfile
+        from pathlib import Path
+
+        from live_subtitles.media.controller import MediaController, Session
+        from live_subtitles.media.store import Store, StoredTrack
+        from live_subtitles.settings import Settings
+
+        c = MediaController(Settings(), Store(Path(tempfile.mkdtemp()) / "m.db"))
+        s = Session(1, "t")
+        s.track = StoredTrack("k", "k", {}, "x", self.cues)
+        s.aligner.segments.append(align.Segment(0.0, 1.0, 0.0))
+        wanted = []
+        c.bridge_wanted.connect(wanted.append)
+        on = [(w, t, t + 0.3) for w, t in _heard(self.cues, 1.0, 0.0, 100, 105)]
+        c._check_on_track(s, on)
+        self.assertFalse(s.off_track)
+        # An extra scene: words that are nowhere near this point of the track.
+        scene = [(w, 110 + i * 0.4, 110.3 + i * 0.4) for i, w in
+                 enumerate("hospital sandwich printer basketball dinosaur committee".split())]
+        c._check_on_track(s, scene)
+        self.assertTrue(s.off_track)
+        self.assertEqual(wanted, [True])
+        c.session = s
+        self.assertIsNone(c.lines_now())          # live captions, not lines from elsewhere
+        c._check_on_track(s, [(w, t, t + 0.3) for w, t in _heard(self.cues, 1.0, 0.0, 120, 125)])
+        self.assertFalse(s.off_track)
+
     def test_match_score_tells_tracks_apart(self):
         heard = _heard(self.cues, 1.0, 0.0, 50, 250)
         other = align.TrackIndex(_script(seed=99))
@@ -287,6 +348,99 @@ class MiscTests(unittest.TestCase):
     def test_merge_events(self):
         ev = merge_events([("[music]", 0, 10, 0.6), ("[music]", 5, 15, 0.7), ("[dog barking]", 3, 4, 0.5)])
         self.assertEqual(ev, [("[music]", 0, 15, 0.7), ("[dog barking]", 3, 4, 0.5)])
+
+    def test_season_packs_lose_and_editions_win(self):
+        one = Candidate("opensubtitles", "1", "The.Office.US.S02E03.1080p.WEB-DL", downloads=100)
+        pack = Candidate("opensubtitles", "2", "Season 2 All Episodes", downloads=100)
+        full = Candidate("opensubtitles", "3", "The.Office.US.S02.Complete.DVDRip", downloads=100)
+        ext = Candidate("opensubtitles", "4", "The.Office.US.S02E03.EXTENDED.PCOK.WEB-DL", downloads=10)
+        self.assertLess(score(pack, True), score(one, True))
+        self.assertLess(score(full, True), score(one, True))
+        self.assertGreater(score(ext, True, "extended"), score(one, True, "extended"))
+        self.assertLess(score(ext, True), score(one, True))
+
+    def test_gestdown_matches_country_tagged_show(self):
+        from unittest import mock
+
+        from live_subtitles.media import sources
+        from live_subtitles.media.tmdb import Match
+
+        shows = {"shows": [{"id": "uk", "name": "The Office (UK)"}, {"id": "us", "name": "The Office (US)"}]}
+        asked = []
+
+        def fake(url, *a, **k):
+            asked.append(url)
+            return shows if "/shows/search/" in url else {"matchingSubtitles": []}
+
+        with mock.patch.object(sources.net, "get_json", fake):
+            sources.Gestdown().search(Match("episode", 0, "The Office", 2005, 6, 9, show_imdb_id="tt0386676"))
+        self.assertTrue(asked[-1].endswith("/subtitles/get/us/6/9/English"), asked[-1])
+
+    def test_player_subtitles_keep_english_files(self):
+        from live_subtitles.media import sources
+        from live_subtitles.media.tmdb import Match
+
+        page = sources.PageSubtitles([{"url": "https://cdn.x/subs/English.vtt"}, {"url": "https://cdn.x/subs/Arabic.vtt"},
+                                      {"url": "https://cdn.x/s/ko.vtt"}, {"url": "https://cdn.x/s/a8f3e1.srt"},
+                                      {"url": "https://proxy.x/sub/aHR0", "name": "Hope (2026) ZOOM.es.srt"},
+                                      {"url": "https://proxy.x/sub/aHR1", "name": "Hope.2026.AMZN.WEB-DL.srt"}])
+        names = [c.id for c in page.search(Match("movie", 0, "Hope", 2026))]
+        self.assertEqual(names, ["https://cdn.x/subs/English.vtt", "https://cdn.x/s/a8f3e1.srt", "https://proxy.x/sub/aHR1"])
+
+    def test_looks_english(self):
+        en = [Cue(i, i + 1, ["What are you doing here? I told you to wait for me."]) for i in range(10)]
+        es = [Cue(i, i + 1, ["¿Qué haces aquí? Te dije que me esperaras en la casa."]) for i in range(10)]
+        self.assertTrue(subfile.looks_english(en))
+        self.assertFalse(subfile.looks_english(es))
+
+    def test_follows_the_tab_with_sound(self):
+        from live_subtitles.media.controller import MediaController
+
+        c = MediaController.__new__(MediaController)
+        c._tabs, c._active_tab = {}, None
+        now = 100.0
+        office = {"paused": False}
+        hope = {"paused": False}
+        c._tabs = {1: (now, office, 10.0, 0.0), 2: (now, hope, 90.0, now)}
+        self.assertEqual(c._pick_tab(now), 2)           # only Hope makes sound
+        # Both heard: the one started most recently, steadily (no flip-flopping).
+        c._tabs[1] = (now, office, 10.0, now)
+        self.assertEqual(c._pick_tab(now), 2)
+        # A quiet scene in Hope (no sound for a few seconds) doesn't hand over to the other tab.
+        c._tabs[2] = (now, hope, 90.0, now - 5)
+        self.assertEqual(c._pick_tab(now), 2)
+        # A video left playing in a background tab loses to the one on screen.
+        c._tabs[2] = (now, dict(hope, visible=False), 95.0, now)
+        self.assertEqual(c._pick_tab(now), 1)
+        # The watched tab goes quiet for a moment (an ad, buffering): a background tab waits.
+        c._active_tab = 1
+        c._tabs = {1: (now - 5, office, 10.0, now - 5), 2: (now, dict(hope, visible=False), 95.0, now)}
+        self.assertEqual(c._pick_tab(now), 1)
+        # ... but takes over once the watched one has been gone a while.
+        c._tabs[1] = (now - 40, office, 10.0, now - 40)
+        self.assertEqual(c._pick_tab(now), 2)
+        # A tab on screen takes over straight away.
+        c._tabs = {1: (now - 5, office, 10.0, now - 5), 2: (now, hope, 95.0, now)}
+        self.assertEqual(c._pick_tab(now), 2)
+
+    def test_saved_broadcast_track_is_not_reused_for_extended_cut(self):
+        from live_subtitles.media.controller import _fits_cut
+        from live_subtitles.media.store import StoredTrack
+        from live_subtitles.media.tmdb import Match
+
+        ext = Match("episode", 0, "The Office", 2005, 6, 9, edition="extended")
+        broadcast = StoredTrack("k", "k", {"release": "2HD"}, "gestdown:1", [])
+        pcok = StoredTrack("k", "k", {"release": "The.Office.US.S06E09.EXTENDED.1080p.PCOK"}, "opensubtitles:2", [])
+        self.assertFalse(_fits_cut(broadcast, ext))
+        self.assertTrue(_fits_cut(pcok, ext))
+        self.assertTrue(_fits_cut(broadcast, Match("episode", 0, "The Office", 2005, 6, 9)))
+
+    def test_episode_title_from_release(self):
+        from live_subtitles.media.controller import _release_episode_title as named
+
+        self.assertEqual(named("The.Office.US.S06E09.Double.Date.EXTENDED.1080p.PCOK.WEB-DL"), "Double Date")
+        self.assertEqual(named("The Office (US) - S06E09 - Double Date"), "Double Date")
+        self.assertEqual(named("The.Office.US.S06E09.720p.HDTV.X264-DIMENSION"), "")
 
     def test_srt_writer_round_trip(self):
         cues = subfile.load_bytes(to_srt([Cue(1.0, 2.0, ["a", "b"])]).encode())

@@ -21,11 +21,13 @@ for tracks without sound descriptions, and the viewer's nudges.
 from __future__ import annotations
 
 import json
+import re
 import logging
 import os
 import subprocess
 import threading
 import time
+import dataclasses
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -37,12 +39,15 @@ from . import align, sources as sources_mod, subfile, titles, winwatch
 from .align import Aligner, Anchor, TrackIndex
 from .clock import AudioClock, ExtensionClock
 from .store import Store, StoredTrack
-from .tmdb import Match, Tmdb, identify_keyless
+from .tmdb import Match, Tmdb, identify_keyless, show_keyless
 
 logger = logging.getLogger(__name__)
 SR = 16000
 RING_S = 240.0
-WORD_WINDOW_S = 10.0         # audio per recognition request
+WORD_WINDOW_S = 5.0          # audio per recognition request (how soon a jump or cut is noticed)
+OFF_TRACK_MIN_WORDS = 4      # content words heard in a window before judging it
+OFF_TRACK_BELOW = 0.15       # share of them in the lines shown at that moment: off track below this
+ON_TRACK_FROM = 0.3          # ... and back on track from this
 SPEECH_WINDOW_S = 180.0      # audio searched for speech-span alignment
 # Measured on Tears of Steel (official SRT, mistimed): the right mapping peaks at z 4.7-6.7
 # with ratio 1.35-2.2 over 2.5-6 minutes of audio; wrong ones at ratio 1.07-1.23.
@@ -102,11 +107,21 @@ class AudioRing:
         return None if best is None else best[1] + (tau - best[0])
 
 
+# HTTP status from a subtitle source -> seconds to leave it alone (quota, rate limit, outage).
+SOURCE_REST_S = {401: 3600.0, 403: 3600.0, 406: 3 * 3600.0, 429: 120.0, 503: 300.0}
+TAB_STALE_S = 3.0                   # a tab that hasn't reported for this long has stopped playing
+TAB_HEARD_S = 15.0                  # a tab that made sound this recently still counts as heard
+TAB_HOLD_S = 30.0                   # a background tab waits this long after the watched one goes quiet
+TAB_FORGET_S = 120.0                # a tab silent this long is forgotten
+LAST_ANSWER = "last-answer:"       # alias-table prefix: the last episode picked for a page
+
+
 # -- session -----------------------------------------------------------------------------
 @dataclass
 class Session:
     gen: int
     window_title: str
+    query: titles.Query | None = None   # what the title (and the extension's episode hint) named
     match: Match | None = None
     english: bool = True
     track: StoredTrack | None = None
@@ -127,6 +142,7 @@ class Session:
     sounds_to: float = 0.0
     sound_events: list = field(default_factory=list)   # [Cue] in track time
     live_cues: list = field(default_factory=list)      # translated lines as they arrive (shown late)
+    off_track: bool = False             # what is heard isn't in the lines the timing points at
     state: str = "identifying"          # identifying | unknown | searching | aligning | synced | generating | none
     detail: str = ""
     last_audio: float = field(default_factory=time.monotonic)
@@ -163,6 +179,10 @@ class MediaController(QObject):
         self._threads: list[threading.Thread] = []
         self._watch_timer = QTimer(self, interval=1000, timeout=self._watch)
         self._last_title = ""
+        self._last_seen = ""            # title plus the extension's episode, to notice a change
+        self._source_resting: dict[str, float] = {}   # source -> monotonic time it may be asked again
+        self._tabs: dict = {}           # tab id -> (last report, report, playing since, last heard)
+        self._active_tab = None
         self._asked_unknown: set[str] = set()
         self._player_report.connect(self._on_player_ui)
         self.web = None
@@ -255,50 +275,81 @@ class MediaController(QObject):
         if s and time.monotonic() - s.last_audio > IDLE_END_S and not self.ext.fresh():
             self._end_session()
         title = self.ext_state.get("title") if self.ext.fresh() else None
-        from_player = False
+        from_player = bool(title)       # the extension only reports a real programme's video
+        episode = self._ext_episode() if title else None
         if not title:
             w = winwatch.foreground()
             if w is None or not w.watchable:
                 return
             title, from_player = w.title, w.is_player
-        if title == self._last_title:
+        seen = f"{title}|{episode}"
+        if seen == self._last_seen:
             return
-        self._last_title = title
+        self._last_seen, self._last_title = seen, title
         if not self.clock.playing() and not self.ext.fresh():
             # Browsing, not watching. Look again when the title changes or audio starts.
-            self._last_title = ""
+            self._last_seen = ""
             return
-        self._consider(title, from_player)
+        self._consider(title, from_player, episode)
 
-    def _consider(self, title: str, from_player: bool = False) -> None:
-        alias = self.store.alias(titles.site_key(title))
+    def _ext_episode(self) -> tuple[int, int] | None:
+        """The season and episode the extension read off the page, for sites (Peacock,
+        Netflix) whose title never names one."""
+        ep = self.ext_state.get("episode") or {}
+        try:
+            return (int(ep["season"]), int(ep["episode"])) if ep.get("episode") else None
+        except (KeyError, TypeError, ValueError, AttributeError):
+            return None
+
+    def _consider(self, title: str, from_player: bool = False, episode: tuple[int, int] | None = None) -> None:
+        key = titles.site_key(title)
+        alias = self.store.alias(key)
         if alias is None and not titles.looks_like_media(title, from_player):
             return              # YouTube, a news article, a search page: not something to subtitle
         q = titles.parse(title)
+        if q is not None and episode and not q.is_episode:
+            q = titles.Query(q.title, q.year, episode[0], episode[1], q.edition)
         if alias is None and q is None:
-            key = titles.site_key(title)
             if self.session is None and key not in self._asked_unknown:
                 self._asked_unknown.add(key)
                 self.unknown_title.emit(title)
             return
+        match = Match.from_dict(alias) if alias else None
+        if match and match.kind == "episode" and q and q.is_episode \
+                and (match.season, match.episode) != (q.season, q.episode):
+            # The answer named the show; the page now names a different episode of it.
+            match = dataclasses.replace(match, season=q.season, episode=q.episode, episode_title="", imdb_id="")
         cur = self.session
         if cur:
-            same = (alias is not None and cur.match is not None and Match.from_dict(alias).key == cur.match.key)                 or (alias is None and q is not None and titles.parse(cur.window_title) == q)
+            same = (match is not None and cur.match is not None and match.key == cur.match.key) \
+                or (match is None and q is not None and cur.query == q)
             if same:
                 cur.window_title = title
                 return
-        self._new_session(title, Match.from_dict(alias) if alias else None, q)
+        self._new_session(title, match, q)
 
     def identify_manually(self, window_title: str, match: Match) -> None:
-        """The answer to "What is this?": remember it for this page and play it."""
-        self.store.set_alias(titles.site_key(window_title or self._last_title), match.to_dict())
-        self._new_session(window_title or self._last_title, match, None)
+        """The answer to "What is this?": remember it for this page and play it. A page whose
+        title names no episode (Peacock shows one title for the whole series) keeps the answer
+        only as a starting point for next time, or every later episode would get this one."""
+        title = window_title or self._last_title
+        q = titles.parse(title)
+        if match.kind == "episode" and not (q and q.is_episode):
+            self.store.set_alias(LAST_ANSWER + titles.site_key(title), match.to_dict())
+        else:
+            self.store.set_alias(titles.site_key(title), match.to_dict())
+        self._new_session(title, match, None)
+
+    def last_answer(self, window_title: str) -> Match | None:
+        """The episode last picked for a page like this one, to suggest the next."""
+        d = self.store.alias(LAST_ANSWER + titles.site_key(window_title))
+        return Match.from_dict(d) if d else None
 
     def _new_session(self, title: str, match: Match | None, q) -> None:
         self._end_session()
         with self._lock:
             self._gen += 1
-            s = Session(self._gen, title)
+            s = Session(self._gen, title, q)
             s.processed_to = s.sounds_to = s.translated_to = self.ring.end
             self.session = s
         self._status(s, "identifying", q.label() if q else (match.label() if match else title))
@@ -330,28 +381,46 @@ class MediaController(QObject):
 
                 tmdb = Tmdb(unprotect(self.s.media.tmdb_key))
                 match = tmdb.identify(q) if tmdb.key else identify_keyless(q)
+                if match is None and ": " in q.title:
+                    # "The Office: Superfan" and the like: the show is the part before the colon.
+                    short = titles.Query(q.title.split(": ")[0], q.year, q.season, q.episode, q.edition)
+                    match = tmdb.identify(short) if tmdb.key else identify_keyless(short)
                 if match is None:
-                    self._status(s, "unknown", f"Couldn't find \"{q.title}\" · right-click → What is this?")
+                    show = "" if q.is_episode else show_keyless(q)
+                    if show:
+                        self._status(s, "unknown", f"Which episode of {show}? · right-click → What is this?")
+                    else:
+                        self._status(s, "unknown", f"Couldn't find \"{q.title}\" · right-click → What is this?")
                     self.unknown_title.emit(s.window_title)
                     return
             if not self._current(s):
                 return
+            if q is not None and q.edition and not match.edition:
+                match = dataclasses.replace(match, edition=q.edition)
             s.match = match
             s.english = match.original_language in ("en", "") or self.s.media.audio_language == "en"
             if s.english:
                 self.bridge_wanted.emit(True)
             stored = self.store.get(match.key)
-            if stored:
+            if stored and not stored.generated and _fits_cut(stored, match):
                 self._use_track(s, stored, "cached")
                 return
+            # A track made from the audio last time, or one for another cut (a broadcast track
+            # saved for an extended episode), is only a stand-in: look for real ones first.
             self._status(s, "searching", match.label())
             srcs = sources_mod.make_sources(self.s.media)
+            page = self._page_source()
+            if page:
+                srcs.append(page)
             s.candidates = [c for c in sources_mod.search_all(srcs, match, self.s.media.sound_descriptions)
                             if c.uid not in self.store.rejected(match.key)]
             if not self._current(s):
                 return
             if not self._next_candidate(s, srcs):
-                self._start_generation(s, "No subtitles found")
+                if stored and stored.cues:
+                    self._use_track(s, stored, "made from the audio last time")
+                else:
+                    self._start_generation(s, "No subtitles found")
         except Exception as exc:
             logger.exception("Media load failed")
             if self._current(s):
@@ -363,6 +432,8 @@ class MediaController(QObject):
         for c in s.candidates:
             if c.uid in s.tried:
                 continue
+            if time.monotonic() < self._source_resting.get(c.source, 0.0):
+                continue
             s.tried.add(c.uid)
             src = srcs.get(c.source)
             if src is None:
@@ -370,16 +441,32 @@ class MediaController(QObject):
             try:
                 cues = subfile.load_bytes(src.download(c))
             except Exception as exc:
-                logger.info("Candidate %s failed: %s", c.uid, exc)
+                logger.info("Candidate %s failed: %s", c.uid, str(exc)[:160])
+                rest = SOURCE_REST_S.get(getattr(exc, "status", 0))
+                if rest:
+                    # Out of downloads for today, rate-limited or down: every other candidate
+                    # from this source would fail the same way (and some still count as downloads).
+                    self._source_resting[c.source] = time.monotonic() + rest
+                    logger.info("Not asking %s again for %.0f min", c.source, rest / 60)
                 continue
             m = s.match
             dur = subfile.track_duration(cues)
             if m.runtime_s and (dur > m.runtime_s * 1.15 + 180 or dur < m.runtime_s * 0.5):
                 logger.info("Candidate %s runs %.0fs for a %.0fs title; skipped", c.uid, dur, m.runtime_s)
                 continue
+            if c.source == "page" and not subfile.looks_english(cues):
+                logger.info("Player subtitles %s aren't English; skipped", c.uid[:120])
+                continue
             if len(cues) < 20:
                 continue
-            track = StoredTrack(m.key, m.label(), m.to_dict(), c.uid, cues)
+            named = _release_episode_title(c.release)
+            if m.kind == "episode" and named and titles.normalize_name(m.episode_title) not in titles.normalize_name(named):
+                # TMDB numbers some seasons differently (a two-parter counted once); the
+                # release names the episode actually playing.
+                m.episode_title = named
+            # The release name rides along in the match, so a later visit can tell whether
+            # this track was made for the cut being watched.
+            track = StoredTrack(m.key, m.label(), dict(m.to_dict(), release=c.release), c.uid, cues)
             if not self._current(s):
                 return True
             self.store.put(track)
@@ -389,6 +476,9 @@ class MediaController(QObject):
 
     def _use_track(self, s: Session, track: StoredTrack, how: str) -> None:
         s.track = track
+        named = _release_episode_title(track.match.get("release", ""))
+        if s.match and s.match.kind == "episode" and named                 and titles.normalize_name(s.match.episode_title) not in titles.normalize_name(named):
+            s.match.episode_title = named      # a saved track from before names were checked
         s.index = TrackIndex(track.cues) if s.english else None
         s.mask = align.cue_mask(track.cues, subfile.track_duration(track.cues) + 600)
         s.aligner = Aligner()
@@ -398,9 +488,13 @@ class MediaController(QObject):
         s.sound_events = list(track.sounds)
         if self.ext.fresh():
             self._enter_media_domain(s)
-        if track.source == "generated:stream" and s.domain == "media":
-            # Generated from the stream itself: already in the video's own time.
+        from_stream = track.source == "generated:stream" or track.source.startswith("page:")
+        if from_stream and s.domain == "media":
+            # Generated from the stream, or the player's own file: already in the video's time.
             s.aligner.segments.append(align.Segment(-1e9, 1.0, 0.0))
+            self._status(s, "synced", how)
+            logger.info("Track for %s: %s (%d cues)", track.label, track.source[:120], len(track.cues))
+            return
         self._status(s, "aligning", how)
         logger.info("Track for %s: %s (%d cues)", track.label, track.source, len(track.cues))
 
@@ -449,8 +543,8 @@ class MediaController(QObject):
         # CPU per 10 s window, and continuous anchors catch frame-rate drift, seeks and cuts
         # within a window or two.
         end = self.ring.end
-        if s.track is None and s.generating != "asr":
-            return
+        if (s.track is None or s.generating == "stream") and s.generating != "asr":
+            return              # nothing to line up with yet (or the stream is making the track)
         if end - s.processed_to < WORD_WINDOW_S:
             return
         if end - s.processed_to > 3 * WORD_WINDOW_S:
@@ -471,8 +565,11 @@ class MediaController(QObject):
             s.gen_words += [Word(t, a, b) for t, a, b in heard]
             s.dirty = True
             return
+        if s.index is None:
+            return
         s.words += [(t, a) for t, a, _ in heard]
         result = s.aligner.add(s.index.anchors([(t, a) for t, a, _ in heard]))
+        self._check_on_track(s, heard, jumped=result == "jumped")
         if result == "locked":
             score = align.match_score(s.index, s.words)
             self._status(s, "synced", self._source_label(s))
@@ -488,6 +585,30 @@ class MediaController(QObject):
             score = align.match_score(s.index, s.words)
             if score < MISMATCH_SCORE:
                 self._wrong_track(s, automatic=True)
+
+    def _check_on_track(self, s: Session, heard: list, jumped: bool = False) -> None:
+        """Does what was just said appear in the lines the timing points at? An extended cut's
+        extra scene, or a cut the aligner hasn't caught yet, puts the track off by its length;
+        until the timing is found again, live captions beat lines from somewhere else."""
+        seg = s.aligner.current
+        if seg is None or not heard:
+            return
+        said = [w for t, _, _ in heard for w in align.tokens(t) if len(w) > 2 and w not in subfile.ENGLISH_WORDS]
+        if jumped:
+            off = False
+        elif len(said) < OFF_TRACK_MIN_WORDS:
+            return
+        else:
+            c0 = seg.scale * heard[0][1] + seg.offset + s.track.nudge - 4.0
+            c1 = seg.scale * heard[-1][2] + seg.offset + s.track.nudge + 4.0
+            shown = {w for c in s.cues if c.end >= c0 and c.start <= c1 for line in c.lines for w in align.tokens(line)}
+            share = sum(w in shown for w in said) / len(said)
+            off = True if share < OFF_TRACK_BELOW else False if share >= ON_TRACK_FROM else s.off_track
+        if off != s.off_track:
+            s.off_track = off
+            logger.info("%s at %.1f", "Off track (live captions)" if off else "Back on track", heard[0][1])
+            if off:
+                self.bridge_wanted.emit(True)   # usually still running from before the lock
 
     def _sync_foreign(self, s: Session) -> None:
         end = self.ring.end
@@ -546,12 +667,17 @@ class MediaController(QObject):
             s.dirty = True
 
     # -- generation ----------------------------------------------------------------------
-    def _start_generation(self, s: Session, why: str) -> None:
+    def _start_generation(self, s: Session, why: str, from_stream: bool = True) -> None:
         m = s.match
-        media = [x for x in self.ext_state.get("media", []) if x.get("url")] if self.ext.fresh() else []
+        media = [x for x in self.ext_state.get("media", []) if x.get("url")]             if from_stream and self.ext.fresh() else []
         if media:
             self._generate_from_stream(s, media[0]["url"], self.ext_state.get("page", ""))
             return
+        if not m.original_language and s.english:
+            # Identified without TMDB, so the audio's language is a guess. Whisper detects it
+            # and gives English either way; the English-only recogniser would turn Korean into noise.
+            s.english = False
+            self.bridge_wanted.emit(False)
         s.generating = "asr" if s.english else "translate"
         s.track = StoredTrack(m.key, m.label(), m.to_dict(), f"generated:{s.generating}", [])
         s.aligner = Aligner()
@@ -581,8 +707,8 @@ class MediaController(QObject):
         start = max(0.0, self.ext.now() - 5)
         cmd = [_python_exe(), "-m", "live_subtitles", "media-generate", url, "--start", f"{start:.2f}",
                "--referer", page]
-        if not s.english:
-            cmd += ["--translate", m.original_language]
+        if not s.english or not m.original_language:
+            cmd += ["--translate", m.original_language or "auto"]
         if self.s.media.generated_sounds and self.s.media.sound_descriptions:
             cmd.append("--sounds")
         if not self.s.files.use_gpu:
@@ -615,6 +741,13 @@ class MediaController(QObject):
                 s.sound_events += [Cue(a, b, lines) for a, b, lines in ev["cues"]]
                 s.dirty = True
             elif kind == "error":
+                logger.info("Stream generation failed: %s", ev.get("message", ""))
+                if not s.track.cues:
+                    # Protected (DRM) streams such as Peacock's can't be read: transcribe what plays.
+                    if s.gen_proc.poll() is None:
+                        s.gen_proc.kill()
+                    self._start_generation(s, "Stream can't be read", from_stream=False)
+                    return
                 self._status(s, "generating", f"Generation failed: {ev.get('message', '')}"[:90])
         if self._current(s):
             self._save(s)
@@ -718,6 +851,8 @@ class MediaController(QObject):
                 return ["Syncing subtitles…"] if self.clock.playing() else []
             # The page's own clock: track times are close to media times on most releases.
             seg = align.Segment(0.0, s.track.scale or 1.0, 0.0)
+        if s.off_track and s.english:
+            return None              # what's heard isn't in these lines: live captions until found again
         tau = self.position(s)
         c = seg.scale * tau + seg.offset + (s.track.nudge if s.track else 0.0)
         sd = self.s.media.sound_descriptions
@@ -781,20 +916,65 @@ class MediaController(QObject):
 
     # -- extension -----------------------------------------------------------------------
     def _on_player_thread(self, data: dict) -> dict:
+        now = time.monotonic()
+        tab = data.get("tab_id", data.get("tab"))
+        with self._lock:
+            _, _, since, heard_at = self._tabs.get(tab, (0.0, None, None, 0.0))
+            if data.get("audible", True) and not data.get("muted"):
+                heard_at = now
+            playing = not data.get("paused", True)
+            if playing and data.get("started_ago") is not None:
+                # When the page started playing, not when this app first heard of it: the
+                # order survives an app restart.
+                since = now - float(data["started_ago"])
+            self._tabs[tab] = (now, data, (since or now) if playing else None, heard_at)
+            active = self._pick_tab(now)
+        if tab != active:
+            # Another tab with a video (a show left playing, a muted preview): not the one watched.
+            return {"ok": True, "state": "other tab"}
         self.ext.report(data.get("position", 0.0), data.get("paused", True), data.get("rate", 1.0),
                         data.get("duration", 0.0))
         self.ext_state = data
         self._player_report.emit(data)
         return {"ok": True, "state": self.session.state if self.session else "watching"}
 
+    def _pick_tab(self, now: float):
+        """The tab being watched: one playing on screen (a background tab's video can't be
+        watched), then one making sound; the most recently started if several."""
+        for t in [t for t, v in self._tabs.items() if now - v[0] > TAB_FORGET_S]:
+            del self._tabs[t]
+        live = {t: v for t, v in self._tabs.items() if now - v[0] < TAB_STALE_S}
+        playing = {t: v for t, v in live.items() if v[2] is not None}
+        # The browser's "making sound" flag drops in every quiet scene; recent sound counts.
+        heard = {t: v for t, v in playing.items() if now - v[3] < TAB_HEARD_S}
+        seen = {t: v for t, v in (heard or playing).items() if v[1].get("visible", True)}
+        pool = seen or heard or playing
+        if pool:
+            best = max(pool, key=lambda t: pool[t][2])
+            cur = self._tabs.get(self._active_tab)
+            # An ad break or a buffering stall silences the watched tab for a moment; a tab
+            # in the background doesn't take over then, only once the watched one is gone.
+            if best != self._active_tab and cur is not None and not pool[best][1].get("visible", True)                     and now - cur[0] < TAB_HOLD_S:
+                return self._active_tab
+            self._active_tab = best
+        elif self._active_tab not in live and live:
+            self._active_tab = max(live, key=lambda t: live[t][0])
+        return self._active_tab
+
+    def _page_source(self):
+        subs = [x for x in self.ext_state.get("subtitles", []) if x.get("url")] if self.ext.fresh() else []
+        return sources_mod.PageSubtitles(subs, self.ext_state.get("page", "")) if subs else None
+
     def _on_player_ui(self, data: dict) -> None:
         s = self.session
         if s and s.track is not None and s.domain != "media":
             self._enter_media_domain(s)
         title = data.get("title") or ""
-        if title and title != self._last_title and not data.get("paused", True):
-            self._last_title = title
-            self._consider(title)
+        episode = self._ext_episode()
+        seen = f"{title}|{episode}"
+        if title and seen != self._last_seen and not data.get("paused", True):
+            self._last_seen, self._last_title = seen, title
+            self._consider(title, True, episode)
 
     def _status_dict(self) -> dict:
         s = self.session
@@ -841,6 +1021,24 @@ class MediaController(QObject):
             "generating": f"{title} · {detail}",
         }.get(state, detail)
         self.status_changed.emit(state, text)
+
+
+RELEASE_EPISODE = re.compile(r"S\d{1,2}E\d{1,3}[ ._-]+(.+?)(?:[ ._-]+(?:EXTENDED|PROPER|REPACK|\d{3,4}p|HDTV|SDTV|WEB|DVD|"
+                             r"BluRay|BDRip|x26\d|XviD|AMZN|PCOK|NF|en|eng)\b|\s*$)", re.I)
+RELEASE_NOISE = re.compile(r"^(?:\d{3,4}p|HDTV|SDTV|WEB(?:-?DL|Rip)?|DVD(?:Rip)?|BluRay|x26\d|XviD)\b", re.I)
+
+
+def _release_episode_title(release: str) -> str:
+    """"The.Office.US.S06E09.Double.Date.EXTENDED.1080p" -> "Double Date"; "" if it names none."""
+    m = RELEASE_EPISODE.search(release or "")
+    if not m or RELEASE_NOISE.match(m.group(1)):
+        return ""
+    return re.sub(r"[._]+", " ", m.group(1)).strip(" -")
+
+
+def _fits_cut(track: StoredTrack, m: Match) -> bool:
+    """Was a saved track made for this cut? Extended cuts need a track that says so."""
+    return not m.edition or m.edition in (track.match.get("release") or "").lower()
 
 
 def _cue_at(cues: list[Cue], t: float, show: float | None = None) -> Cue | None:

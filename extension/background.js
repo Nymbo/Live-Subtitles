@@ -2,34 +2,67 @@
 // and subtitle URLs this tab's player requested (the app needs them to make subtitles
 // ahead of playback). Nothing leaves this machine.
 
+importScripts("classify.js"); // MEDIA, SUBS, subtitleOf
+
 const DEFAULT_PORT = 47219;
-const MEDIA = /\.(m3u8|mpd|mp4|m4v|webm|mkv)(\?|$)/i;
-const SUBS = /\.(vtt|srt|ass|ssa)(\?|$)/i;
-const seen = new Map(); // tabId -> {media: [{url, type, frameId}], subtitles: [{url, frameId}]}
+const seen = new Map(); // tabId -> {media: [{url, type, frameId}], subtitles: [{url, name, frameId}]}
 
 function remember(tabId, list, item) {
   if (tabId < 0) return;
   const entry = seen.get(tabId) || { media: [], subtitles: [] };
   const arr = entry[list];
   if (!arr.some((x) => x.url === item.url)) {
-    arr.unshift(item);
-    arr.length = Math.min(arr.length, 12);
+    if (list === "subtitles") {
+      // Players often fetch every language at once; keep them in request order (the
+      // site's own order, English usually first) and enough of them to reach English.
+      arr.push(item);
+      arr.length = Math.min(arr.length, 200);
+    } else {
+      arr.unshift(item);
+      arr.length = Math.min(arr.length, 12);
+    }
   }
   seen.set(tabId, entry);
 }
 
+function classify(tabId, frameId, url) {
+  const sub = subtitleOf(url);
+  if (sub) {
+    remember(tabId, "subtitles", { ...sub, frameId });
+  } else if (MEDIA.test(url) && !/\.ts(\?|$)/i.test(url)) {
+    const type = /\.m3u8/i.test(url) ? "hls" : /\.mpd/i.test(url) ? "dash" : "file";
+    // A variant playlist arrives after its master; keep the first (master) per tab.
+    remember(tabId, "media", { url, type, frameId });
+  }
+}
+
 chrome.webRequest.onBeforeRequest.addListener(
   (d) => {
-    const url = d.url;
-    if (SUBS.test(url)) remember(d.tabId, "subtitles", { url, frameId: d.frameId });
-    else if (MEDIA.test(url) && !/\.ts(\?|$)/i.test(url)) {
-      const type = /\.m3u8/i.test(url) ? "hls" : /\.mpd/i.test(url) ? "dash" : "file";
-      // A variant playlist arrives after its master; keep the first (master) per tab.
-      remember(d.tabId, "media", { url, type, frameId: d.frameId });
+    if (d.tabId >= 0) {
+      classify(d.tabId, d.frameId, d.url);
+    } else if (d.initiator && (SUBS.test(d.url) || subtitleOf(d.url))) {
+      // Fetched by the site's own service worker: no tab, so credit the tabs on that site.
+      chrome.tabs.query({}, (tabs) => {
+        for (const t of tabs) {
+          if (t.url && t.url.startsWith(d.initiator)) classify(t.id, 0, d.url);
+        }
+      });
     }
   },
   { urls: ["<all_urls>"], types: ["xmlhttprequest", "media", "other"] }
 );
+
+// A reloaded or updated extension isn't in the tabs already open until they reload; put the
+// content script in them now, so a video that is already playing is followed straight away.
+chrome.runtime.onInstalled.addListener(() => {
+  chrome.tabs.query({ url: ["http://*/*", "https://*/*"] }, (tabs) => {
+    for (const t of tabs) {
+      chrome.scripting
+        .executeScript({ target: { tabId: t.id, allFrames: true }, files: ["classify.js", "content.js"] })
+        .catch(() => {}); // pages the extension may not touch (the web store, error pages)
+    }
+  });
+});
 
 chrome.tabs.onRemoved.addListener((tabId) => seen.delete(tabId));
 chrome.tabs.onUpdated.addListener((tabId, info) => {
@@ -46,8 +79,15 @@ async function port() {
 }
 
 chrome.runtime.onMessage.addListener((msg, sender) => {
-  if (!msg || msg.type !== "video" || !sender.tab) return;
+  if (!msg || !sender.tab) return;
   const tabId = sender.tab.id;
+  if (msg.type === "files") {
+    for (const url of msg.loaded || []) classify(tabId, sender.frameId, url);
+    return;
+  }
+  if (msg.type !== "video") return;
+  // Files the page loaded before this worker saw its requests (extension reloaded, worker restarted).
+  for (const url of msg.loaded || []) classify(tabId, sender.frameId, url);
   const entry = seen.get(tabId) || { media: [], subtitles: [] };
   // Media requested by the frame that holds the video first; its URL is the Referer the CDN expects.
   const sameFrame = (x) => x.frameId === sender.frameId;
@@ -58,14 +98,21 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
   const body = {
     title: sender.tab.title || "",
     tab: sender.tab.url || "",
+    tab_id: tabId,
+    // Several tabs can hold a playing video; the app follows the one making sound.
+    audible: !!sender.tab.audible,
+    muted: !!(sender.tab.mutedInfo && sender.tab.mutedInfo.muted),
     page: msg.frame,
     position: msg.position,
     duration: msg.duration,
     paused: msg.paused,
     rate: msg.rate,
     reason: msg.reason,
+    started_ago: msg.started_ago,
+    visible: msg.visible !== false && sender.tab.active,
+    episode: msg.episode || null,
     media,
-    subtitles: entry.subtitles.map((x) => ({ url: x.url })),
+    subtitles: entry.subtitles.map((x) => ({ url: x.url, name: x.name || "" })),
   };
   port().then((p) =>
     fetch(`http://127.0.0.1:${p}/player`, {
