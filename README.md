@@ -79,27 +79,37 @@ TV*, or Ctrl+Alt+V):
    on IMDb when no TMDB key is set. YouTube, Twitch and the like are ignored. When a page's
    title names nothing useful, right-click the subtitles → *What is this?* once; the
    answer is remembered for that site.
-2. **The subtitles.** The cache first, then OpenSubtitles, Wyzie Subs, SubDL and Addic7ed
-   (through Gestdown) in parallel, scored on downloads, uploader trust, sound
-   descriptions and release, with machine translations ranked last. TV works with no
-   account; movies need a key for one of the first three (all free; Settings → Movies &
-   TV, stored DPAPI-encrypted).
+2. **The subtitles.** With the browser extension, the page player's own English
+   subtitle file comes first: it was made for that stream. Then the cache, then
+   OpenSubtitles, Wyzie Subs, SubDL and Addic7ed (through Gestdown) in parallel, scored on
+   downloads, uploader trust, sound descriptions and release, with machine translations
+   and whole-season packs ranked last. Extended cuts (Peacock's Superfan episodes) prefer
+   an EXTENDED track, and a saved track for a different cut doesn't count as cached. TV
+   works with no account; movies need a key for one of the first three (all free;
+   Settings → Movies & TV, stored DPAPI-encrypted). Adding more than one is worth it:
+   OpenSubtitles' free account allows 20 downloads a day, and a source that reports its
+   limit or a rate limit is left alone for a while instead of asked again for every track.
 3. **Sync.** The track is checked against what the speakers play. English audio: the
-   media worker recognises ten-second stretches (Parakeet TDT, int8 on the CPU, about 0.7 s
-   each) and matches rare three-word runs against the track's lines. Until that locks, the
-   overlay keeps showing live captions, so there is never a gap. Other languages (Korean,
+   media worker recognises five-second stretches (Parakeet TDT, int8 on the CPU) and
+   matches rare three-word runs against the track's lines. Until that locks, the overlay
+   keeps showing live captions, so there is never a gap. Other languages (Korean,
    Japanese, ...) with English subtitles: voice activity is cross-correlated with the
    track's cue spans instead, which takes a couple of minutes of speech; until then the
    overlay says "Syncing subtitles…" rather than guess.
 4. **Keeping it synced.** Recognition keeps running. Frame-rate mismatches (a 25 fps
    track on 23.976 fps video drifts 4.3%), seeks and cut scenes all show up as anchors
-   that disagree with the current mapping, and the mapping follows. A track whose words
-   never match what is heard is the wrong episode or cut, and the next candidate is tried.
+   that disagree with the current mapping, and the mapping follows, usually within 5-10 s
+   of dialogue. While what is heard doesn't match the lines the timing points at (a scene
+   the track doesn't have), the overlay switches to live captions until it finds its
+   place again, so it never shows lines from elsewhere. A track whose words never match
+   what is heard is the wrong episode or cut, and the next candidate is tried.
 5. **No subtitles anywhere.** English: live captions carry on, and what they heard is
-   saved as a track for next time. Other languages: Whisper medium translates each line
-   to English as it finishes (a few seconds late), also saved. With the browser extension,
-   which knows the stream's address, `media-generate` makes the track from the stream
-   ahead of the playhead instead.
+   saved as a track for next time (and replaced as soon as real subtitles turn up).
+   Other languages, or a title whose language isn't known: Whisper medium detects the
+   language and translates each line to English as it finishes (a few seconds late), also
+   saved. With the browser extension, which knows the stream's address, `media-generate`
+   makes the track from the stream ahead of the playhead instead; protected (DRM) streams
+   can't be read, so those fall back to the audio.
 6. **Sound descriptions.** On by default. Tracks with them ([door creaks], speaker names)
    rank first; turning them off strips them from the same track. Tracks without them get
    sparse generated cues ([music], [laughter], [phone ringing]) from an AudioSet tagger
@@ -118,22 +128,33 @@ and found the frame-rate ratio about two minutes in; from then on lines landed w
 
 ### The browser extension (optional)
 
-`extension\` is a small Chrome/Edge extension (chrome://extensions → Developer mode →
-Load unpacked). It reports the page's video position, pause and seeks to the app on
-127.0.0.1:47219, plus the stream and subtitle addresses the player requested. With it,
-timing is exact from the first second and survives seeks instantly, and tracks can be
-generated ahead of playback. Without it everything else still works from the audio alone.
+`extension\` is a small Chrome/Edge extension. It isn't in the Chrome Web Store or Edge
+Add-ons; load it from the repo:
+
+1. Open `chrome://extensions` (or `edge://extensions`) and turn on **Developer mode**.
+2. Click **Load unpacked** and pick the `extension` folder of your clone.
+3. After a `git pull` that changes `extension\`, click the extension's reload arrow on
+   that page. It adds itself to tabs that are already open; if a playing video isn't
+   picked up, reload that tab.
+
+It reports the page's video position, pause and seeks to the app on 127.0.0.1:47219, plus
+the stream and subtitle addresses the player requested. With it, timing is exact from the
+first second and survives seeks instantly, and tracks can be generated ahead of playback.
+Without it everything else still works from the audio alone. Nothing leaves your
+computer; [PRIVACY.md](PRIVACY.md) lists exactly what it sends to the app.
 
 When the page's player loads its own subtitle files (including ones fetched through a
-proxy that hides the file name in a base64 path), the English one is used first: it was
-made for that stream, so it is in time from the start and costs no download. With videos
-playing in several tabs, the app follows the one with sound that was started last.
+proxy that hides the file name in a base64 path, or loaded before the extension started),
+the English one is used first: it was made for that stream, so it is in time from the
+start and costs no download. With videos playing in several tabs, the app follows the
+one on screen; among several, the one making sound that was started last. A tab in the
+background doesn't take over during a short silence in the one being watched (an ad
+break, buffering).
 
 It also reads the episode off the player ("S2 E3", "Season 2, Episode 3") on sites such as
 Peacock and Netflix, whose page title names the show but never the episode. Without the
 extension those sites ask once per episode (right-click → *What is this?*, which offers the
-episode after the last one picked). Extended cuts (Peacock's Superfan episodes) prefer an
-EXTENDED subtitle track.
+episode after the last one picked, and works without a TMDB key).
 
 Generating a track from a file (or a stream URL) without the app:
 
@@ -299,7 +320,14 @@ live_subtitles/
     dialogs.py        the "What is this?" window
     winwatch.py       foreground window title and program (Win32)
     secrets.py        DPAPI encryption for API keys
-extension/            optional Chrome/Edge extension (video position, stream URLs)
+extension/            optional Chrome/Edge extension, loaded unpacked
+  content.js          in every frame: the main video's state, the episode on the player
+  classify.js         which requested URLs are subtitle files or streams (shared)
+  background.js       request watching, per-tab state, posts to the app
+  popup.html/.js      the toolbar popup (app status, port)
+  icons/              drawn by tools/extension.py
+tools/extension.py    redraws the extension's icons
+PRIVACY.md            what the extension and the app send, and where
 run.pyw               tray launcher (pythonw, no console)
 setup.ps1             builds .venv with uv
 tests/test_core.py    unit tests for the pure-Python parts
@@ -329,6 +357,12 @@ bench/                live-caption benchmark: scenes, runner, report, real-time 
   desktop), since the audio is what it syncs to.
 - Generated translations (no English track anywhere) are Whisper medium's, a few seconds
   behind live; a person's subtitles are far better when they exist.
+- Subtitle sources have daily limits on free accounts (OpenSubtitles: 20 downloads).
+  A rewatch costs nothing (it is cached), but a binge of new episodes can use a day's
+  allowance; keys for more than one source spread the load.
+- TMDB numbers some seasons differently from the streaming sites and subtitle sources
+  (a two-parter counted as one episode). The right track still loads, because the
+  sources go by their own numbering, and the episode name shown comes from the track.
 
 ## Licence
 

@@ -23,7 +23,10 @@ choice; read it before changing a model, an engine, or the caption pipeline.
   `titles.py`, `clock.py`, `store.py` are pure Python with tests in `tests/test_media.py`.
   Its models run in `python -m live_subtitles media-worker` (`media/worker.py`), tracks
   from a file or stream in `media-generate`. `extension/` is the optional browser
-  extension that reports the video's position to `media/web.py`.
+  extension that reports the video's position to `media/web.py`. It is not published to
+  any store: users load it unpacked from the repo (README), so a change to it ships with
+  a push, and `PRIVACY.md` must stay true to what it sends. Its icons come from
+  `tools/extension.py icons`.
 - `tests/test_core.py` covers the pure-Python parts.
 
 ## Rules that are easy to break
@@ -48,7 +51,8 @@ choice; read it before changing a model, an engine, or the caption pipeline.
   still in progress may change. The benchmark's rewrite and line-jump counts should stay 0.
 - **Media cues are never shown at a guessed offset** with only the audio clock to go on.
   Before a lock, English shows live captions and other languages "Syncing subtitles…";
-  wrong lines are worse than none. Sync thresholds in `media/controller.py` were measured
+  after a lock, English falls back to live captions while what is heard doesn't match
+  the lines the timing points at. Wrong lines are worse than none. Sync thresholds in `media/controller.py` were measured
   on Tears of Steel (`bench/src`); re-measure before changing them.
 - Measure model or pipeline changes with the benchmark (`bench.run` on all scenes, then
   `bench.report` against the previous label) and update the README's tables.
