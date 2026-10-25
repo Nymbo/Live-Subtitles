@@ -2,8 +2,10 @@
   "manifest_version": 3,
   "name": "Live Subtitles",
   "version": "0.2.0",
-  "description": "Tells the Live Subtitles app where the video on this page is, so movie and TV subtitles line up exactly.",
-  "permissions": ["webRequest", "storage", "tabs", "scripting"],
+  "description": "Companion to the Live Subtitles desktop app: tells it where the video on the page is, so movie and TV subtitles line up exactly.",
+  "homepage_url": "https://github.com/Nymbo/Live-Subtitles",
+  "icons": { "16": "icons/icon16.png", "32": "icons/icon32.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },
+  "permissions": ["webRequest", "storage", "scripting"],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "background.js" },
   "content_scripts": [
@@ -14,5 +16,9 @@
       "run_at": "document_idle"
     }
   ],
-  "action": { "default_popup": "popup.html", "default_title": "Live Subtitles" }
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Live Subtitles",
+    "default_icon": { "16": "icons/icon16.png", "32": "icons/icon32.png", "48": "icons/icon48.png" }
+  }
 }

@@ -9,3 +9,6 @@ __pycache__/
 .idea/
 Thumbs.db
 desktop.ini
+
+# Built extension zips (python tools/extension.py pack)
+dist/
