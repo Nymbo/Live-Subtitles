@@ -76,9 +76,13 @@ TV*, or Ctrl+Alt+V):
 
 1. **What's playing.** The title of the browser or player window in front ("The Bear
    S02E04", "Dune: Part Two (2024)", a release file name in VLC) is looked up on TMDB, or
-   on IMDb when no TMDB key is set. YouTube, Twitch and the like are ignored. When a page's
-   title names nothing useful, right-click the subtitles → *What is this?* once; the
-   answer is remembered for that site.
+   on IMDb when no TMDB key is set. YouTube, Twitch and the like are ignored. With the
+   extension, a page titled only with the site's name ("CineWave") is still identified:
+   from a TMDB or IMDb id in the player's address (`/embed/movie/1375161`,
+   `/tv/1399/2/5`, `tt0944947`), checked against what the page shows so a site's own page
+   number isn't mistaken for one, or from the page's other names for it (structured data,
+   share-card metadata, the media session, its heading). When nothing names it, right-click
+   the subtitles → *What is this?* once; the answer is remembered for that site.
 2. **The subtitles.** With the browser extension, the page player's own English
    subtitle file comes first: it was made for that stream. Then the cache, then
    OpenSubtitles, Wyzie Subs, SubDL and Addic7ed (through Gestdown) in parallel, scored on

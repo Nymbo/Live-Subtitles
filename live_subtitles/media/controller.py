@@ -39,7 +39,7 @@ from . import align, sources as sources_mod, subfile, titles, winwatch
 from .align import Aligner, Anchor, TrackIndex
 from .clock import AudioClock, ExtensionClock
 from .store import Store, StoredTrack
-from .tmdb import Match, Tmdb, identify_keyless, show_keyless
+from .tmdb import Match, Tmdb, find_keyless, identify_keyless, show_keyless
 
 logger = logging.getLogger(__name__)
 SR = 16000
@@ -122,6 +122,8 @@ class Session:
     gen: int
     window_title: str
     query: titles.Query | None = None   # what the title (and the extension's episode hint) named
+    names: list = field(default_factory=list)   # the page's other names for it, best first
+    ids: list = field(default_factory=list)     # [titles.PageId] from the tab's and frames' addresses
     match: Match | None = None
     english: bool = True
     track: StoredTrack | None = None
@@ -274,7 +276,7 @@ class MediaController(QObject):
         s = self.session
         if s and time.monotonic() - s.last_audio > IDLE_END_S and not self.ext.fresh():
             self._end_session()
-        title = self.ext_state.get("title") if self.ext.fresh() else None
+        title, names, ids, named = self._page_title(self.ext_state) if self.ext.fresh() else (None, [], [], True)
         from_player = bool(title)       # the extension only reports a real programme's video
         episode = self._ext_episode() if title else None
         if not title:
@@ -290,7 +292,20 @@ class MediaController(QObject):
             # Browsing, not watching. Look again when the title changes or audio starts.
             self._last_seen = ""
             return
-        self._consider(title, from_player, episode)
+        self._consider(title, from_player, episode, names, ids, named)
+
+    @staticmethod
+    def _page_title(data: dict) -> tuple[str, list[str], list, bool]:
+        """The page's best name for what is playing, its other names, and ids from its
+        addresses. Sites differ: some put the film in the tab title, others only in a heading,
+        their metadata or the player's address, with the tab titled after the site."""
+        urls = [data.get("tab") or "", data.get("page") or ""] + list(data.get("urls") or [])
+        names = titles.page_names([data.get("title") or ""] + list(data.get("names") or []), urls)
+        ids = titles.page_ids(urls)
+        if names:
+            return names[0], names[1:], ids, True
+        # Only the site's name ("CineWave"): nothing to search for by name, but the ids may do.
+        return data.get("title") or "", [], ids, False
 
     def _ext_episode(self) -> tuple[int, int] | None:
         """The season and episode the extension read off the page, for sites (Peacock,
@@ -301,15 +316,19 @@ class MediaController(QObject):
         except (KeyError, TypeError, ValueError, AttributeError):
             return None
 
-    def _consider(self, title: str, from_player: bool = False, episode: tuple[int, int] | None = None) -> None:
+    def _consider(self, title: str, from_player: bool = False, episode: tuple[int, int] | None = None,
+                  names: list[str] | None = None, ids: list | None = None, named: bool = True) -> None:
+        names, ids = names or [], ids or []
         key = titles.site_key(title)
-        alias = self.store.alias(key)
+        # A title that only names the site is the same on every page of it: no saved answer
+        # for it, and nothing to search for by name.
+        alias = self.store.alias(key) if named else None
         if alias is None and not titles.looks_like_media(title, from_player):
             return              # YouTube, a news article, a search page: not something to subtitle
-        q = titles.parse(title)
+        q = titles.parse(title) if named else None
         if q is not None and episode and not q.is_episode:
             q = titles.Query(q.title, q.year, episode[0], episode[1], q.edition)
-        if alias is None and q is None:
+        if alias is None and q is None and not ids:
             if self.session is None and key not in self._asked_unknown:
                 self._asked_unknown.add(key)
                 self.unknown_title.emit(title)
@@ -322,11 +341,12 @@ class MediaController(QObject):
         cur = self.session
         if cur:
             same = (match is not None and cur.match is not None and match.key == cur.match.key) \
-                or (match is None and q is not None and cur.query == q)
+                or (match is None and q is not None and cur.query == q) \
+                or (match is None and q is None and ids and cur.ids == ids)
             if same:
                 cur.window_title = title
                 return
-        self._new_session(title, match, q)
+        self._new_session(title, match, q, names, ids)
 
     def identify_manually(self, window_title: str, match: Match) -> None:
         """The answer to "What is this?": remember it for this page and play it. A page whose
@@ -345,11 +365,13 @@ class MediaController(QObject):
         d = self.store.alias(LAST_ANSWER + titles.site_key(window_title))
         return Match.from_dict(d) if d else None
 
-    def _new_session(self, title: str, match: Match | None, q) -> None:
+    def _new_session(self, title: str, match: Match | None, q, names: list[str] | None = None,
+                     ids: list | None = None) -> None:
         self._end_session()
         with self._lock:
             self._gen += 1
             s = Session(self._gen, title, q)
+            s.names, s.ids = list(names or []), list(ids or [])
             s.processed_to = s.sounds_to = s.translated_to = self.ring.end
             self.session = s
         self._status(s, "identifying", q.label() if q else (match.label() if match else title))
@@ -380,12 +402,25 @@ class MediaController(QObject):
                 from .secrets import unprotect
 
                 tmdb = Tmdb(unprotect(self.s.media.tmdb_key))
-                match = tmdb.identify(q) if tmdb.key else identify_keyless(q)
-                if match is None and ": " in q.title:
-                    # "The Office: Superfan" and the like: the show is the part before the colon.
-                    short = titles.Query(q.title.split(": ")[0], q.year, q.season, q.episode, q.edition)
-                    match = tmdb.identify(short) if tmdb.key else identify_keyless(short)
+                match = self._match_from_ids(s, tmdb)
+                for name in ([s.window_title] if q else []) + s.names:
+                    if match is not None:
+                        break
+                    nq = q if name == s.window_title else titles.parse(name)
+                    if nq is None:
+                        continue
+                    if q is not None and q.is_episode and not nq.is_episode:
+                        nq = titles.Query(nq.title, nq.year, q.season, q.episode, q.edition)
+                    match = tmdb.identify(nq) if tmdb.key else identify_keyless(nq)
+                    if match is None and ": " in nq.title:
+                        # "The Office: Superfan" and the like: the show is the part before the colon.
+                        short = titles.Query(nq.title.split(": ")[0], nq.year, nq.season, nq.episode, nq.edition)
+                        match = tmdb.identify(short) if tmdb.key else identify_keyless(short)
                 if match is None:
+                    if q is None:
+                        self._status(s, "unknown", "Couldn't tell what's playing · right-click → What is this?")
+                        self.unknown_title.emit(s.window_title)
+                        return
                     show = "" if q.is_episode else show_keyless(q)
                     if show:
                         self._status(s, "unknown", f"Which episode of {show}? · right-click → What is this?")
@@ -425,6 +460,40 @@ class MediaController(QObject):
             logger.exception("Media load failed")
             if self._current(s):
                 self._status(s, "unknown", f"Lookup failed: {exc}"[:90])
+
+    def _match_from_ids(self, s: Session, tmdb: Tmdb) -> Match | None:
+        """What the ids in the page's addresses name, if the page's names agree. A site's own
+        page number can look like a TMDB id, so an id has to come from a player's embed address
+        or match a name the page shows."""
+        names = [s.window_title] + s.names if s.query else s.names
+        heard = [titles.parse(n) for n in names]
+        hint = s.query if s.query and s.query.is_episode else None
+        for pid in s.ids:
+            season, episode = (pid.season, pid.episode) if pid.episode else \
+                ((hint.season, hint.episode) if hint else (None, None))
+            try:
+                if pid.imdb_id:
+                    m = tmdb.find(pid.imdb_id, season, episode) if tmdb.key else \
+                        find_keyless(pid.imdb_id, season, episode)
+                elif not tmdb.key:
+                    continue        # a bare TMDB id can't be checked without a key
+                elif pid.kind == "tv":
+                    if not episode:
+                        continue
+                    m = tmdb.lookup("tv", pid.tmdb_id, season or 1, episode)
+                else:
+                    m = tmdb.lookup("movie", pid.tmdb_id)
+            except Exception as exc:
+                logger.info("No title for %s: %s", pid, str(exc)[:120])
+                continue
+            if m is None:
+                continue
+            named = [h for h in heard if h is not None]
+            if any(titles.same_title(m.title, h.title) for h in named) or (not named and pid.embed):
+                logger.info("Identified from the page's address: %s", m.label())
+                return m
+            logger.info("Id %s names %s, not what the page shows; skipped", pid.tmdb_id or pid.imdb_id, m.title)
+        return None
 
     def _next_candidate(self, s: Session, srcs=None) -> bool:
         """Download the best untried candidate that parses and fits the runtime."""
@@ -986,12 +1055,12 @@ class MediaController(QObject):
         s = self.session
         if s and s.track is not None and s.domain != "media":
             self._enter_media_domain(s)
-        title = data.get("title") or ""
+        title, names, ids, named = self._page_title(data)
         episode = self._ext_episode()
         seen = f"{title}|{episode}"
         if title and seen != self._last_seen and not data.get("paused", True):
             self._last_seen, self._last_title = seen, title
-            self._consider(title, True, episode)
+            self._consider(title, True, episode, names, ids, named)
 
     def _status_dict(self) -> dict:
         s = self.session

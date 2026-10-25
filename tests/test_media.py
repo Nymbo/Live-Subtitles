@@ -111,6 +111,34 @@ class TitleTests(unittest.TestCase):
     def test_site_key_ignores_episode(self):
         self.assertEqual(site_key("Show S01E02 - Site - Google Chrome"), site_key("Show S01E03 - Site - Google Chrome"))
 
+    def test_page_ids_from_embed_addresses(self):
+        from live_subtitles.media.titles import PageId, page_ids
+
+        self.assertEqual(page_ids(["https://vsembed.ru/embed/movie/1375161"]),
+                         [PageId("movie", 1375161, "", None, None, True)])
+        self.assertEqual(page_ids(["https://vidsrc.to/embed/tv/1399/2/5"]),
+                         [PageId("tv", 1399, "", 2, 5, True)])
+        self.assertEqual(page_ids(["https://player.example/embed?tmdb=550"]), [PageId("movie", 550, "", None, None, True)])
+        self.assertEqual(page_ids(["https://x.example/embed/tv?tmdb=1399&season=1&episode=3"])[0],
+                         PageId("tv", 1399, "", 1, 3, True))
+        imdb = page_ids(["https://site.example/title/tt0944947/watch"])
+        self.assertEqual(imdb[0].imdb_id, "tt0944947")
+        # A site's own numbering looks the same; it is reported, but not as an embed.
+        self.assertFalse(page_ids(["https://cinejoy.pk/watch/movie/1058424"])[0].embed)
+        self.assertEqual(page_ids(["https://watch.cinewave.qzz.io/play/DgYYDBJMR1ZUXF9TRg", "about:blank"]), [])
+        # A frame from another site than the tab is an embedded player, whatever its path.
+        self.assertTrue(page_ids(["https://watch.cinewave.qzz.io/play/x", "https://vidfast.pro/movie/1375161"])[0].embed)
+
+    def test_page_names_skip_the_site_name(self):
+        from live_subtitles.media.titles import page_names, same_title
+
+        urls = ["https://watch.cinewave.qzz.io/play/DgYYDBJMR1ZUXF9TRg", "https://vsembed.ru/embed/movie/1375161"]
+        self.assertEqual(page_names(["CineWave", "Don't Move", "CINEWAVE", "Don't Move"], urls), ["Don't Move"])
+        self.assertEqual(page_names(["Watch Movies Online Free", "Hope (2026)"], urls), ["Hope (2026)"])
+        self.assertTrue(same_title("Don't Move", "Don’t Move"))
+        self.assertTrue(same_title("The Office", "The Office (US)"))
+        self.assertFalse(same_title("Don't Move", "Hope"))
+
 
 class SubfileTests(unittest.TestCase):
     def test_srt(self):
@@ -256,6 +284,40 @@ class AlignTests(unittest.TestCase):
         self.assertIsNone(c.lines_now())          # live captions, not lines from elsewhere
         c._check_on_track(s, [(w, t, t + 0.3) for w, t in _heard(self.cues, 1.0, 0.0, 120, 125)])
         self.assertFalse(s.off_track)
+
+    def test_page_without_a_title_identified_from_its_player(self):
+        import tempfile
+        from pathlib import Path
+
+        from live_subtitles.media.controller import MediaController, Session
+        from live_subtitles.settings import Settings
+
+        class FakeTmdb:
+            key = "k"
+
+            def lookup(self, kind, tmdb_id, season=None, episode=None):
+                return {1375161: Match("movie", 1375161, "Don't Move", 2026),
+                        1058424: Match("movie", 1058424, "Something Else", 2023)}[tmdb_id]
+
+        c = MediaController(Settings(), Store(Path(tempfile.mkdtemp()) / "m.db"))
+        report = {"title": "CineWave", "tab": "https://watch.cinewave.qzz.io/play/DgYYDBJMR1ZUXF9TRg",
+                  "page": "https://vsembed.ru/embed/movie/1375161",
+                  "names": ["Don't Move", "CineWave"], "urls": []}
+        title, names, ids, named = c._page_title(report)
+        self.assertEqual((title, names, named), ("Don't Move", [], True))
+        s = Session(1, title, parse(title))
+        s.names, s.ids = names, ids
+        self.assertEqual(c._match_from_ids(s, FakeTmdb()).label(), "Don't Move (2026)")
+        # Only the site's name and the player's address: the embed id is trusted.
+        title, names, ids, named = c._page_title(dict(report, names=[]))
+        self.assertFalse(named)
+        s = Session(1, title, None)
+        s.ids = ids
+        self.assertEqual(c._match_from_ids(s, FakeTmdb()).tmdb_id, 1375161)
+        # A site's own page number that names another film than the page shows: not used.
+        s = Session(1, "Hope (2026)", parse("Hope (2026)"))
+        s.ids = c._page_title({"title": "Hope (2026)", "tab": "https://cinejoy.pk/watch/movie/1058424"})[2]
+        self.assertIsNone(c._match_from_ids(s, FakeTmdb()))
 
     def test_notice_explains_live_captions(self):
         import tempfile

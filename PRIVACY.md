@@ -13,7 +13,8 @@ the extension. The extension talks only to the Live Subtitles app on your own co
 While a page plays a video of two minutes or longer, the extension sends these details to
 the Live Subtitles app at `http://127.0.0.1:47219` (your own computer, never the internet):
 
-- the tab's title and address, and the address of the frame that holds the video;
+- the tab's title and address, the addresses of the page's frames, and the names the page
+  gives what is playing (its heading, its metadata, the frames' titles);
 - the video's position, length, playback rate, and whether it is paused;
 - whether the tab is visible and making sound;
 - the season and episode number if the page shows one (for example "S2 E3");

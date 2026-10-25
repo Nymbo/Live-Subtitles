@@ -97,6 +97,18 @@ class Tmdb:
             return self._movie(tmdb_id, 1.0)
         return self._episode_details(tmdb_id, self._get(f"/tv/{tmdb_id}"), season or 1, episode or 1, 1.0)
 
+    def find(self, imdb_id: str, season: int | None = None, episode: int | None = None) -> Match | None:
+        """The movie or episode an IMDb id names (an episode's own id, or a show's with numbers)."""
+        d = self._get(f"/find/{imdb_id}", external_source="imdb_id")
+        if d.get("movie_results"):
+            return self._movie(int(d["movie_results"][0]["id"]), 1.0)
+        if d.get("tv_episode_results"):
+            ep = d["tv_episode_results"][0]
+            return self.lookup("tv", int(ep["show_id"]), ep.get("season_number"), ep.get("episode_number"))
+        if d.get("tv_results") and episode:
+            return self.lookup("tv", int(d["tv_results"][0]["id"]), season or 1, episode)
+        return None
+
     def search(self, text: str) -> list[dict]:
         """Raw search for the "What is this?" box: [{kind, tmdb_id, title, year, overview}]."""
         out = []
@@ -213,6 +225,21 @@ def identify_keyless(q: Query) -> Match | None:
                      show_imdb_id=best["id"], original_language="", confidence=conf)
     return Match("movie", 0, best["l"], best.get("y"), imdb_id=best["id"], original_language="",
                  confidence=conf)
+
+
+def find_keyless(imdb_id: str, season: int | None = None, episode: int | None = None) -> Match | None:
+    """An IMDb id without a TMDB key: IMDb's suggestions answer for an id too."""
+    d = next((d for d in _suggest(imdb_id) if d.get("id") == imdb_id), None)
+    if d is None:
+        return None
+    if d.get("qid") in SHOW_KINDS:
+        if not episode:
+            return None
+        return Match("episode", 0, d.get("l", ""), d.get("y"), season or 1, episode, show_imdb_id=imdb_id,
+                     original_language="", confidence=1.0)
+    if d.get("qid") in MOVIE_KINDS:
+        return Match("movie", 0, d.get("l", ""), d.get("y"), imdb_id=imdb_id, original_language="", confidence=1.0)
+    return None
 
 
 def show_keyless(q: Query) -> str:

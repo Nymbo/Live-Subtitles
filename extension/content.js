@@ -68,6 +68,62 @@
     return found;
   }
 
+  // What the page calls the programme. Sites put it in different places: the tab title,
+  // structured data, share-card metadata, the media session, a heading, or only the
+  // player's address with the tab titled after the site. Report them all, best first; the
+  // app skips the ones that only name the site. Frame addresses carry embed players' ids.
+  let namesCache = { at: 0, value: { names: [], frames: [] } };
+  let namesSentAt = 0;
+  function fromJsonLd(node, out) {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) return node.forEach((n) => fromJsonLd(n, out));
+    if (node["@graph"]) fromJsonLd(node["@graph"], out);
+    const types = [].concat(node["@type"] || []);
+    const year = String(node.datePublished || node.dateCreated || "").slice(0, 4);
+    if (types.includes("TVEpisode") && node.episodeNumber) {
+      const series = (node.partOfSeries || node.partOfTVSeries || {}).name || "";
+      const season = (node.partOfSeason || {}).seasonNumber || 1;
+      if (series) out.push(`${series} S${season}E${node.episodeNumber}`);
+    } else if (types.some((t) => t === "Movie" || t === "TVSeries" || t === "VideoObject") && node.name) {
+      out.push(/^\d{4}$/.test(year) && types.includes("Movie") ? `${node.name} (${year})` : node.name);
+    }
+  }
+  const big = (r) => r.width >= 200 && r.height >= 120;
+  // The page itself, or a frame big enough to hold a player: not an ad or tracker frame.
+  const PAGE_FRAME = window === window.top || big({ width: window.innerWidth, height: window.innerHeight });
+  function pageNames() {
+    const now = Date.now();
+    if (now - namesCache.at < 3000) return namesCache.value;
+    const names = [];
+    for (const s of document.querySelectorAll('script[type="application/ld+json"]')) {
+      try {
+        fromJsonLd(JSON.parse(s.textContent), names);
+      } catch (e) {}
+    }
+    for (const sel of ['meta[property="og:title"]', 'meta[name="twitter:title"]', 'meta[name="title"]']) {
+      const c = document.querySelector(sel);
+      if (c && c.content) names.push(c.content);
+    }
+    try {
+      const md = navigator.mediaSession && navigator.mediaSession.metadata;
+      if (md && md.title) names.push(md.title);
+    } catch (e) {}
+    for (const h of document.querySelectorAll("h1, h2")) {
+      const text = (h.textContent || "").replace(/\s+/g, " ").trim(); // not innerText: CSS capitals
+      if (text.length >= 2 && text.length <= 120 && h.getClientRects().length) {
+        names.push(text);
+        break;
+      }
+    }
+    if (document.title) names.push(document.title);
+    // Frames big enough to be a player; ads and tracking pixels are tiny or hidden.
+    const frames = [...document.querySelectorAll("iframe")]
+      .filter((f) => big(f.getBoundingClientRect()))
+      .map((f) => f.src).filter((u) => /^https?:/.test(u));
+    namesCache = { at: now, value: { names: [...new Set(names)].slice(0, 10), frames: frames.slice(0, 10) } };
+    return namesCache.value;
+  }
+
   function report(reason) {
     const v = current;
     if (!v) return;
@@ -89,6 +145,7 @@
         started_ago: startedAt === null ? 86400 : (Date.now() - startedAt) / 1000,
         src: src.startsWith("blob:") ? "" : src,
         frame: location.href,
+        ...pageNames(),
       });
     } catch (e) {
       // The extension was reloaded; this old content script is orphaned.
@@ -119,11 +176,15 @@
     attach(mainVideo());
     if (current && !current.paused) report("tick");
     else if (!current) {
-      // No video in this frame, but it may be the one that fetched the subtitles.
+      // No video in this frame, but it may be the one that fetched the subtitles, or the
+      // page around the player that names the film.
       const loaded = loadedFiles();
-      if (loaded.length) {
+      const page = PAGE_FRAME ? pageNames() : { names: [], frames: [] };
+      const fresh = namesCache.at !== namesSentAt; // names are re-read every 3 s; send each reading once
+      namesSentAt = namesCache.at;
+      if (loaded.length || (fresh && (page.names.length || page.frames.length))) {
         try {
-          chrome.runtime.sendMessage({ type: "files", loaded });
+          chrome.runtime.sendMessage({ type: "files", loaded, frame: PAGE_FRAME ? location.href : "", ...page });
         } catch (e) {
           clearInterval(timer);
         }

@@ -232,3 +232,105 @@ def normalize_name(name: str) -> str:
     n = re.sub(r"^(?:the|a|an)\s+", "", n)
     n = re.sub(r"[^a-z0-9]+", " ", n)
     return re.sub(r"\s+", " ", n).strip()
+
+
+# -- what a web page says it is playing -----------------------------------------------------
+# Streaming sites differ in where they name the film: the tab title, the page's metadata, a
+# heading, or only the player's address ("/embed/movie/1375161", "/tv/1399/1/2", "tt0944947").
+# The extension reports all of them; these pick the usable ones.
+
+@dataclass(frozen=True)
+class PageId:
+    kind: str                   # movie | tv | "" (an IMDb id names no kind)
+    tmdb_id: int = 0
+    imdb_id: str = ""
+    season: int | None = None
+    episode: int | None = None
+    embed: bool = False         # from a player's embed address, not a site's own page
+
+
+IMDB_ID = re.compile(r"\b(tt\d{7,9})\b")
+PATH_ID = re.compile(r"/(movies?|tv|series|shows?)/(?:tmdb[-:]?)?(\d{2,8})(?=[/?#&-]|$)(?:[/-](\d{1,2})[/-](\d{1,4})(?!\d))?", re.I)
+QUERY_TMDB = ("tmdb", "tmdb_id", "tmdbid", "tmdbId", "id")
+QUERY_SEASON = ("season", "s", "se")
+QUERY_EPISODE = ("episode", "e", "ep")
+EMBED = re.compile(r"/(?:embed|e|player|play)/|embed|player", re.I)
+TV_WORDS = ("tv", "series", "show", "shows")
+
+
+def page_ids(urls: list[str]) -> list[PageId]:
+    """Ids of what is playing, from the tab's and its frames' addresses: IMDb ids anywhere,
+    TMDB ids in the paths and parameters embed players use. A site's own page numbers can
+    look the same, so callers check an id's title against the page's names. The first
+    address is the tab's: a frame from another site is a player embedded in it."""
+    import urllib.parse
+
+    out: list[PageId] = []
+    tab_host = urllib.parse.urlsplit(urls[0]).hostname if urls and urls[0] else None
+    for url in urls:
+        if not url or not url.startswith("http"):
+            continue
+        u = urllib.parse.urlsplit(url)
+        embed = bool(EMBED.search(u.netloc + u.path)) or (tab_host is not None and u.hostname != tab_host)
+        qs = {k: v[0] for k, v in urllib.parse.parse_qs(u.query).items() if v}
+        num = lambda keys: next((int(qs[k]) for k in keys if qs.get(k, "").isdigit()), None)
+        season, episode = num(QUERY_SEASON), num(QUERY_EPISODE)
+        for m in IMDB_ID.finditer(urllib.parse.unquote(url)):
+            out.append(PageId("tv" if episode else "", 0, m.group(1), season, episode, embed))
+        for m in PATH_ID.finditer(u.path):
+            kind = "tv" if m.group(1).lower().rstrip("s") in ("tv", "serie", "show") else "movie"
+            s, e = (int(m.group(3)), int(m.group(4))) if m.group(4) else (season, episode)
+            out.append(PageId(kind, int(m.group(2)), "", s, e, embed))
+        tmdb = num(QUERY_TMDB)
+        if tmdb and embed:
+            kind = "tv" if episode or any(w in u.path.lower().split("/") for w in TV_WORDS) else "movie"
+            out.append(PageId(kind, tmdb, "", season, episode, embed))
+    seen, unique = set(), []
+    for i in sorted(out, key=lambda i: (not i.embed, not i.imdb_id)):
+        if i not in seen:
+            seen.add(i)
+            unique.append(i)
+    return unique
+
+
+def site_brands(urls: list[str]) -> set[str]:
+    """The site's own name ("cinewave" for watch.cinewave.qzz.io): a page titled only that
+    names no film."""
+    import urllib.parse
+
+    out = set()
+    for url in urls:
+        host = urllib.parse.urlsplit(url).hostname or ""
+        for label in host.split("."):
+            if len(label) >= 4 and label not in ("www", "watch", "play", "stream", "player", "embed"):
+                out.add(normalize_name(label))
+    return out
+
+
+def page_names(names: list[str], urls: list[str]) -> list[str]:
+    """The names a page gives, best first, without the ones that only name the site."""
+    brands = site_brands(urls)
+    out, seen = [], set()
+    for name in names:
+        name = (name or "").strip()
+        q = parse(name) if name else None
+        if q is None:
+            continue
+        n = normalize_name(q.title)
+        if not n or n.replace(" ", "") in brands or n in brands or (n, q.year, q.season, q.episode) in seen:
+            continue
+        seen.add((n, q.year, q.season, q.episode))
+        out.append(name)
+    return out
+
+
+def same_title(a: str, b: str) -> bool:
+    """Do two names name the same film ("Don't Move" and "Don't Move (2026)")?"""
+    import difflib
+
+    x, y = normalize_name(a), normalize_name(b)
+    if not x or not y:
+        return False
+    return x == y or (min(len(x), len(y)) >= 5 and (x in y or y in x)) \
+        or difflib.SequenceMatcher(None, x, y).ratio() >= 0.8
+

@@ -6,6 +6,7 @@ importScripts("classify.js"); // MEDIA, SUBS, subtitleOf
 
 const DEFAULT_PORT = 47219;
 const seen = new Map(); // tabId -> {media: [{url, type, frameId}], subtitles: [{url, name, frameId}]}
+const pages = new Map(); // tabId -> Map(frameId -> {url, names, frames}): what each frame calls the programme
 
 function remember(tabId, list, item) {
   if (tabId < 0) return;
@@ -64,10 +65,32 @@ chrome.runtime.onInstalled.addListener(() => {
   });
 });
 
-chrome.tabs.onRemoved.addListener((tabId) => seen.delete(tabId));
-chrome.tabs.onUpdated.addListener((tabId, info) => {
-  if (info.status === "loading" && info.url) seen.delete(tabId);
+chrome.tabs.onRemoved.addListener((tabId) => {
+  seen.delete(tabId);
+  pages.delete(tabId);
 });
+chrome.tabs.onUpdated.addListener((tabId, info) => {
+  if (info.status === "loading" && info.url) {
+    seen.delete(tabId);
+    pages.delete(tabId);
+  }
+});
+
+function notePage(tabId, frameId, msg) {
+  const frames = pages.get(tabId) || new Map();
+  frames.set(frameId, { url: msg.frame || "", names: msg.names || [], frames: msg.frames || [] });
+  pages.set(tabId, frames);
+}
+
+// Every frame's names, the top page's first (its heading names the film; the player's
+// frame is often titled after the player), and every frame address.
+function pageOf(tabId, videoFrameId) {
+  const frames = [...(pages.get(tabId) || new Map()).entries()]
+    .sort(([a], [b]) => (a === 0 ? -1 : b === 0 ? 1 : a === videoFrameId ? -1 : b === videoFrameId ? 1 : 0));
+  const names = [...new Set(frames.flatMap(([, f]) => f.names))].slice(0, 16);
+  const urls = [...new Set(frames.flatMap(([, f]) => [f.url, ...f.frames]).filter(Boolean))].slice(0, 24);
+  return { names, urls };
+}
 
 async function port() {
   try {
@@ -83,9 +106,11 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
   const tabId = sender.tab.id;
   if (msg.type === "files") {
     for (const url of msg.loaded || []) classify(tabId, sender.frameId, url);
+    if (msg.names || msg.frames) notePage(tabId, sender.frameId, msg);
     return;
   }
   if (msg.type !== "video") return;
+  notePage(tabId, sender.frameId, msg);
   // Files the page loaded before this worker saw its requests (extension reloaded, worker restarted).
   for (const url of msg.loaded || []) classify(tabId, sender.frameId, url);
   const entry = seen.get(tabId) || { media: [], subtitles: [] };
@@ -111,6 +136,7 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
     started_ago: msg.started_ago,
     visible: msg.visible !== false && sender.tab.active,
     episode: msg.episode || null,
+    ...pageOf(tabId, sender.frameId),
     media,
     subtitles: entry.subtitles.map((x) => ({ url: x.url, name: x.name || "" })),
   };
