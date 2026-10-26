@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import logging
 import os
 import sys
@@ -30,6 +31,8 @@ from .tray import Tray
 
 logger = logging.getLogger(__name__)
 INSTANCE_KEY = f"{APP_NAME}-{os.environ.get('USERNAME', 'user')}"
+ERROR_ALREADY_EXISTS = 183
+_instance_mutex = None
 
 
 class LiveController(QObject):
@@ -524,14 +527,22 @@ def main(open_settings: bool = False) -> int:
     qapp.setApplicationDisplayName(DISPLAY_NAME)
     qapp.setQuitOnLastWindowClosed(False)
 
-    # Single instance: a second launch just opens the first one's settings.
-    probe = QLocalSocket()
-    probe.connectToServer(INSTANCE_KEY)
-    if probe.waitForConnected(300):
-        probe.write(b"settings")
-        probe.waitForBytesWritten(300)
+    # Single instance: a second launch just opens the first one's settings. A named mutex decides
+    # who is first (Windows lets two processes listen on one pipe name, so the socket can't).
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    global _instance_mutex      # never closed: Windows releases it when this process exits
+    _instance_mutex = kernel32.CreateMutexW(None, False, f"Local\\{INSTANCE_KEY}")
+    if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
+        probe = QLocalSocket()
+        for _ in range(20):          # the first copy may still be starting up
+            probe.connectToServer(INSTANCE_KEY)
+            if probe.waitForConnected(250):
+                probe.write(b"settings")
+                probe.waitForBytesWritten(300)
+                break
+            time.sleep(0.25)
         return 0
-    QLocalServer.removeServer(INSTANCE_KEY)
     server = QLocalServer()
     server.listen(INSTANCE_KEY)
 
